@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apply_seg_onnx"
+dynamic = ["version"]
+description = "ONNX Runtime inference of 3D MRI segmentation models (MINC/NIfTI) without PyTorch"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Vladimir S. Fonov", email = "v.s.fonov@ilmarin.info" }]
+dependencies = [
+    "minc2_simple",
+    "numpy",
+    "scipy",
+    "onnx",
+    "onnxruntime",   # or onnxruntime-gpu (see README)
+]
+
+[project.optional-dependencies]
+nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key
+mindglide = ["nibabel", "scikit-image"]  # MindGlide-compatible pipeline ("reorient", "resample": "mindglide")
+progress = ["tqdm"]                    # --progress
+all = ["nibabel", "scikit-image", "tqdm"]
+
+[project.scripts]
+apply_seg_onnx = "apply_seg_onnx.inference:main"
+
+[tool.setuptools]
+packages = ["apply_seg_onnx"]
+
+[tool.setuptools.dynamic]
+version = { attr = "apply_seg_onnx.__version__" }
