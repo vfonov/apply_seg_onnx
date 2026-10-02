@@ -95,6 +95,20 @@ def test_volume_helpers():
     assert np.all(n[a == 0] == 0) and abs(n[a != 0].mean()) < 1e-5
 
 
+def test_resize():
+    rng = np.random.default_rng(3)
+    img = rng.normal(5, 1, (12, 13, 7))
+    for order in (0, 1, 3):
+        for mode in ('edge', 'constant'):
+            assert np.array_equal(V._resize(img, img.shape, order, mode), img)  # same grid: identity
+            out = V._resize(img, (25, 9, 14), order, mode)
+            assert out.shape == (25, 9, 14) and out.dtype == img.dtype
+            lo = 0 if mode == 'constant' else img.min()  # clipped to the input range (+ cval when used)
+            assert out.min() >= lo and out.max() <= img.max()
+    # 2x upsampling along an axis with grid_mode: nearest neighbour repeats every voxel twice
+    assert np.array_equal(V._resize(img, (24, 13, 7), 0, 'edge'), np.repeat(img, 2, axis=0))
+
+
 def test_minc_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         fn = os.path.join(tmp, 'v.mnc')

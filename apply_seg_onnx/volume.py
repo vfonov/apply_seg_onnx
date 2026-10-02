@@ -238,15 +238,36 @@ def mindglide_resample_shape(spacing, shape, target_spacing=(1.0, 1.0, 1.0)):
     return True, new_shape, bool(anis)
 
 
+def _resize(img, shape, order, mode='edge', cval=0.0):
+    """
+    Resize `img` to `shape` (same number of dimensions) the way MindGlide resamples: spline interpolation
+    of `order` with grid_mode=True (voxel corners aligned), `mode` 'edge' (replicate) or 'constant' (cval),
+    no anti-aliasing, output clipped to the input value range (widened to cval when cval is used).
+    """
+    import scipy.ndimage as ndi
+    img = np.asarray(img)
+    if img.dtype == np.float16:
+        img = img.astype(np.float32)
+    if order > 0 and img.dtype.char not in 'fd':
+        img = img.astype(np.float64)
+    ndi_mode = {'edge': 'nearest', 'constant': 'grid-constant'}[mode]
+    factors = np.divide(img.shape, shape)
+    out = ndi.zoom(img, [1 / f for f in factors], order=order, mode=ndi_mode, cval=cval, grid_mode=True)
+    lo, hi = np.min(img), np.max(img)
+    if mode == 'constant' and not lo <= cval <= hi and np.min(out) <= cval <= np.max(out):
+        cval = img.dtype.type(cval)  # cval used by the interpolation widens the clip range
+        lo, hi = min(lo, cval), max(hi, cval)
+    np.clip(out, np.asarray(lo), np.asarray(hi), out=out)
+    return out
+
+
 def mindglide_resample_image(img, shape, anisotropy_flag):
     """Port of mindglide.transforms.resample_image for a single 3D channel."""
-    from skimage.transform import resize
     if anisotropy_flag:
-        slices = [resize(img[:, :, i], shape[:-1], order=3, mode='edge', cval=0,
-                         clip=True, anti_aliasing=False) for i in range(img.shape[-1])]
+        slices = [_resize(img[:, :, i], shape[:-1], order=3, mode='edge', cval=0) for i in range(img.shape[-1])]
         out = np.stack(slices, axis=-1)
-        return resize(out, shape, order=0, mode='constant', cval=0, clip=True, anti_aliasing=False)
-    return resize(img, shape, order=3, mode='edge', cval=0, clip=True, anti_aliasing=False)
+        return _resize(out, shape, order=0, mode='constant', cval=0)
+    return _resize(img, shape, order=3, mode='edge', cval=0)
 
 
 def mindglide_recover_labels(labels, n_classes, shape, anisotropy_flag):
@@ -255,7 +276,6 @@ def mindglide_recover_labels(labels, n_classes, shape, anisotropy_flag):
     back to `shape` by resizing every class mask (1..n_classes-1) and thresholding at 0.5.
     Ties resolve to the lowest label; voxels claimed by no class become 0.
     """
-    from skimage.transform import resize
     out = np.zeros(shape, dtype=np.uint8)
     claimed = np.zeros(shape, dtype=bool)
     for c in range(1, n_classes):
@@ -263,15 +283,13 @@ def mindglide_recover_labels(labels, n_classes, shape, anisotropy_flag):
         if anisotropy_flag:
             h, w = mask.shape[:2]
             d = shape[-1]
-            m_d = resize(mask.astype(float), (h, w, d), order=0, mode='constant', cval=0,
-                         clip=True, anti_aliasing=False) >= 0.5
+            m_d = _resize(mask.astype(float), (h, w, d), order=0, mode='constant', cval=0) >= 0.5
             m = np.zeros(shape, dtype=bool)
             for k in range(d):
-                m[:, :, k] = resize(m_d[:, :, k].astype(float), shape[:-1], order=1, mode='edge',
-                                    cval=0, clip=True, anti_aliasing=False) >= 0.5
+                m[:, :, k] = _resize(m_d[:, :, k].astype(float), shape[:-1], order=1, mode='edge',
+                                    cval=0) >= 0.5
         else:
-            m = resize(mask.astype(float), shape, order=1, mode='edge', cval=0,
-                       clip=True, anti_aliasing=False) >= 0.5
+            m = _resize(mask.astype(float), shape, order=1, mode='edge', cval=0) >= 0.5
         # argmax over a one-hot volume picks the lowest class that is set
         new = m & ~claimed
         out[new] = c
@@ -284,13 +302,12 @@ def mindglide_recover_prob(prob, shape, anisotropy_flag):
     Bring a probability map (one channel) back to `shape` with the same interpolation
     MindGlide uses for its class masks: linear, or nearest along the last axis then linear in-plane.
     """
-    from skimage.transform import resize
     if anisotropy_flag:
         h, w = prob.shape[:2]
-        p_d = resize(prob, (h, w, shape[-1]), order=0, mode='constant', cval=0, clip=True, anti_aliasing=False)
-        return np.stack([resize(p_d[:, :, k], shape[:-1], order=1, mode='edge', cval=0, clip=True,
-                                anti_aliasing=False) for k in range(shape[-1])], axis=-1).astype(np.float32)
-    return resize(prob, shape, order=1, mode='edge', cval=0, clip=True, anti_aliasing=False).astype(np.float32)
+        p_d = _resize(prob, (h, w, shape[-1]), order=0, mode='constant', cval=0)
+        return np.stack([_resize(p_d[:, :, k], shape[:-1], order=1, mode='edge', cval=0)
+                         for k in range(shape[-1])], axis=-1).astype(np.float32)
+    return _resize(prob, shape, order=1, mode='edge', cval=0).astype(np.float32)
 
 
 def nonzero_mean_std_normalize(arr):

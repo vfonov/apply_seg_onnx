@@ -14,8 +14,7 @@ Pipelines are selected by a JSON config file. They include:
 
 ```bash
 pip install .              # minc2_simple, numpy, scipy, onnx, onnxruntime
-pip install .[nifti]       # + nibabel: .nii.gz I/O, "reorient"
-pip install .[mindglide]   # + nibabel, scikit-image: MindGlide pipeline ("reorient", "resample": "mindglide")
+pip install .[nifti]       # + nibabel: .nii.gz I/O, "reorient" (MindGlide pipeline)
 pip install .[all]         # + tqdm (--progress)
 ```
 
@@ -54,7 +53,7 @@ All of these keys are off by default.
 |---|---|
 | `reorient` | Reorient to these axis codes, e.g. `"RAS"`, like MONAI `Orientationd`, and reorient back afterwards (needs nibabel). |
 | `crop_foreground` | Crop to the bounding box of voxels > 0, then un-crop the result. |
-| `resample: "mindglide"` | Resample on the voxel grid the way MindGlide does (needs scikit-image). |
+| `resample: "mindglide"` | Resample on the voxel grid the way MindGlide does (`scipy.ndimage.zoom`, bit-identical to MindGlide). |
 | `spacing_float32` | Round the affine to float32 before MindGlide's exact spacing test. |
 | `normalize_mean_std_nonzero` | Z-score of the nonzero voxels only (MONAI `NormalizeIntensity(nonzero=True)`). |
 | `largest`, `largest_connectivity` | Keep the largest connected component. Connectivity 1 means 6-connectivity. |
@@ -69,7 +68,7 @@ All of these keys are off by default.
 |---|---|
 | `inference` | Command line (`main`), `make_onnx_sessions`, `segment_whole`, `segment_with_patches_overlap` (MONAI window layout), `segment_with_onnx[_batched]`, MindGlide pre/post-processing |
 | `onnx_tiled` | `TiledGroupNormSession`: drop-in for `InferenceSession.run()` that cuts the graph at every GroupNorm, runs the local stages tile by tile with a halo, and computes exact statistics from per-tile Σx, Σx² |
-| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, MindGlide resample/recover, MONAI window starts and Gaussian map (numpy; nibabel/skimage imported lazily) |
+| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, MindGlide resample/recover (`_resize`, on `scipy.ndimage.zoom`), MONAI window starts and Gaussian map (numpy/scipy; nibabel imported lazily) |
 | `postprocess` | `find_largest_component`, `measure_volumes`, `save_measurements` |
 | `io` | `load_volume_np` / `save_volume`, which dispatch on `.mnc` / `.nii.gz` |
 | `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume` |
@@ -87,5 +86,5 @@ python tests/test_package.py      # or: pytest tests
 The tests cover:
 - `TiledGroupNormSession` against plain ORT on a synthetic GroupNorm U-Net;
 - MINC and NIfTI round-trips, including a clear error when nibabel is missing;
-- the volume helpers;
+- the volume helpers, including `_resize`;
 - that importing the package does not import torch.

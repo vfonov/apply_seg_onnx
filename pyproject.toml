@@ -18,10 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key
-mindglide = ["nibabel", "scikit-image"]  # MindGlide-compatible pipeline ("reorient", "resample": "mindglide")
+nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key (MindGlide pipeline)
 progress = ["tqdm"]                    # --progress
-all = ["nibabel", "scikit-image", "tqdm"]
+all = ["nibabel", "tqdm"]
 
 [project.scripts]
 apply_seg_onnx = "apply_seg_onnx.inference:main"
