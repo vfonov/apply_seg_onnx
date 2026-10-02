@@ -61,12 +61,7 @@ def measure_volumes(seg, aff, labels_desc, out_seg_f=None, in_scan=None, load_ou
         raise ValueError("labels_desc must be dict, filename or list")
     
     if load_output and seg is None and out_seg_f is not None:
-        if out_seg_f.endswith('.mnc'):
-            seg, aff = load_volume_np(out_seg_f, dtype='int16')
-        elif out_seg_f.endswith('.nii.gz'):
-            seg, aff = load_volume_np(out_seg_f, dtype='int16')
-        else:
-            raise ValueError(f"Unsupported file format: {out_seg_f}")
+        seg, aff = load_volume_np(out_seg_f, dtype='native')  # label values of any integer type
     
     if seg is None:
         results = {'scan': in_scan, 'segmentation': out_seg_f}

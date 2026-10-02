@@ -60,7 +60,7 @@ All of these keys are off by default.
 | `sigma_scale`, `sw_batch_size` | Gaussian window weights; windows per ONNX call. |
 | `tiled_groupnorm` | Tile size for `TiledGroupNormSession`, used with `whole`. 128 needs about 9.5 GB of GPU memory, 96 about 8 GB, 64 about 4.5 GB. |
 | `trim_center` | With `whole` + `trim`, also centre the trimmed box along Z. |
-| `label_values` | Map class index to the saved label value. A list `labels_desc` then refers to `label_values[1:]`. |
+| `label_values` | Map class index to the saved label value. A list `labels_desc` then refers to `label_values[1:]`. The output uses the smallest type that holds the values (uint8/uint16/uint32, int8/16/32 if negative). |
 
 ## Modules
 
@@ -80,11 +80,26 @@ Rule: nothing in this package imports `torch`.
 ## Tests
 
 ```bash
-python tests/test_package.py      # or: pytest tests
+python -m pytest            # from the repository root; needs pytest
+python -m pytest -m "not gpu and not reference"   # skip the CUDA and MONAI cross-checks
 ```
 
-The tests cover:
-- `TiledGroupNormSession` against plain ORT on a synthetic GroupNorm U-Net;
-- MINC and NIfTI round-trips, including a clear error when nibabel is missing;
-- the volume helpers, including `_resize`;
-- that importing the package does not import torch.
+The tests need no data files or PyTorch: they build small synthetic ONNX models on the fly. One is a pointwise
+1×1×1 conv whose labels are a known function of intensity; the other is a 2-level GroupNorm U-Net.
+
+| file | covers |
+|---|---|
+| `test_volume.py` | normalisation, crop/pad, bbox, reorient, MindGlide resample/recovery, window layout and Gaussian weights (`reference`: against MONAI) |
+| `test_resize.py` | `_resize` (scipy port of skimage resize) |
+| `test_io.py` | MINC/NIfTI round-trips and affines, metadata/history, missing nibabel, world-space resampling |
+| `test_postprocess.py` | largest component, volume measurements, CSV |
+| `test_onnx_tiled.py` | `TiledGroupNormSession` against plain ORT (`gpu`: on CUDA) |
+| `test_inference.py` | sliding window, whole volume, MindGlide pre/post-processing |
+| `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, CLI |
+| `test_package.py` | the package never imports torch |
+
+Markers:
+- `gpu` tests are skipped without `CUDAExecutionProvider`.
+- `reference` tests are skipped without monai.
+
+One test is a strict `xfail` documenting a known issue: the precision of tiled GroupNorm depends on the tile size.

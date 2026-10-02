@@ -16,7 +16,7 @@ def load_volume_np(fname, dtype=None, as_byte=False):
     
     Args:
         fname: Path to volume file (.mnc or .nii.gz)
-        dtype: Data type for numpy array
+        dtype: Data type for numpy array: dtype name, None (float64) or 'native' (the file's own type)
         as_byte: Load as uint8 (for labels/masks)
     
     Returns:
@@ -25,7 +25,7 @@ def load_volume_np(fname, dtype=None, as_byte=False):
     if fname.endswith('.mnc'):
         return load_minc_volume_np(fname, as_byte=as_byte, dtype=dtype)
     elif fname.endswith('.nii.gz'):
-        return load_nifti_volume_np(fname, dtype=dtype)
+        return load_nifti_volume_np(fname, as_byte=as_byte, dtype=dtype)
     else:
         raise ValueError(f"Unsupported file format: {fname}")
 

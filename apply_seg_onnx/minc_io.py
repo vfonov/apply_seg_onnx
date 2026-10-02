@@ -11,6 +11,20 @@ from time import gmtime, strftime
 import numpy as np
 
 from .geo import decompose,compose
+from .volume import smallest_int_dtype
+
+# numpy dtype -> (MINC storage type, MINC representation type); integers are stored unscaled,
+# floating point data as scaled 16-bit integers
+_MINC_TYPES = {
+    np.dtype(np.uint8):   (minc2_file.MINC2_UBYTE,  minc2_file.MINC2_UBYTE),
+    np.dtype(np.int8):    (minc2_file.MINC2_BYTE,   minc2_file.MINC2_BYTE),
+    np.dtype(np.uint16):  (minc2_file.MINC2_USHORT, minc2_file.MINC2_USHORT),
+    np.dtype(np.int16):   (minc2_file.MINC2_SHORT,  minc2_file.MINC2_SHORT),
+    np.dtype(np.uint32):  (minc2_file.MINC2_UINT,   minc2_file.MINC2_UINT),
+    np.dtype(np.int32):   (minc2_file.MINC2_INT,    minc2_file.MINC2_INT),
+    np.dtype(np.float32): (minc2_file.MINC2_SHORT,  minc2_file.MINC2_FLOAT),
+    np.dtype(np.float64): (minc2_file.MINC2_SHORT,  minc2_file.MINC2_DOUBLE),
+}
 
 """ 
     Create minc-style history entry
@@ -72,6 +86,7 @@ def affine_to_dims(aff, shape):
     Load minc volume into numpy volume and return voxel2world matrix too
 """
 def load_minc_volume_np(fname, as_byte=False, dtype=None):
+    """dtype: numpy dtype name, None (float64) or 'native' (the file's own type, e.g. uint16 for label files)"""
     mm=minc2_file(fname)
     mm.setup_standard_order()
 
@@ -79,9 +94,11 @@ def load_minc_volume_np(fname, as_byte=False, dtype=None):
         dtype='uint8'
     elif dtype is None:
         dtype='float64'
+    elif dtype == 'native':
+        dtype=mm.representation_dtype()
 
     d = mm.load_complete_volume(dtype)
-    aff=np.asmatrix(hdr_to_affine(mm.representation_dims()))
+    aff=hdr_to_affine(mm.representation_dims())
 
     mm.close()
     return d, aff
@@ -91,22 +108,30 @@ def load_minc_volume_np(fname, as_byte=False, dtype=None):
     Save numpy volume into minc file
 """
 def save_minc_volume(fn, data, aff, ref_fname=None, history=None):
+    """
+    Integer data (8, 16, 32 bit, signed or unsigned) is stored as is, floating point data as scaled short.
+    bool -> uint8, float16 -> float32, 64-bit integers -> smallest integer type that holds the values
+    (float64 stored as double, with a warning, if 32 bits are not enough).
+    """
     dims=affine_to_dims(aff, data.shape)
     out=minc2_file()
-    if data.dtype == np.uint8: 
-        out.define(dims, minc2_file.MINC2_UBYTE, minc2_file.MINC2_UBYTE)
-    elif data.dtype == np.uint16:
-        out.define(dims, minc2_file.MINC2_USHORT, minc2_file.MINC2_USHORT)
-    elif data.dtype == np.int8: 
-        out.define(dims, minc2_file.MINC2_BYTE, minc2_file.MINC2_BYTE)
-    elif data.dtype == np.int16:
-        out.define(dims, minc2_file.MINC2_SHORT, minc2_file.MINC2_SHORT)
-    elif data.dtype == np.float32:
-        out.define(dims, minc2_file.MINC2_SHORT, minc2_file.MINC2_FLOAT)
-    elif data.dtype == np.float64:
-        out.define(dims, minc2_file.MINC2_SHORT, minc2_file.MINC2_DOUBLE)
+    if isinstance(data, np.ndarray):
+        store_type = None
+        if data.dtype == np.bool_:
+            data = data.astype(np.uint8)
+        elif data.dtype == np.float16:
+            data = data.astype(np.float32)
+        elif data.dtype in (np.int64, np.uint64):
+            dt = smallest_int_dtype(data)
+            if dt == np.float64:
+                store_type = minc2_file.MINC2_DOUBLE  # keep large integer values exact
+            data = data.astype(dt)
+        if data.dtype not in _MINC_TYPES:
+            raise ValueError(f"unsupported dtype {data.dtype} for MINC")
+        default_store, representation = _MINC_TYPES[data.dtype]
+        out.define(dims, store_type or default_store, representation)
     else:
-        assert(False) # unsupported type
+        out.define(dims, minc2_file.MINC2_SHORT, minc2_file.MINC2_FLOAT)
 
     out.create(fn)
     

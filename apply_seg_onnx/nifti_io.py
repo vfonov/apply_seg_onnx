@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """NIfTI volume I/O (numpy) through nibabel, an optional dependency (pip install apply_seg_onnx[nifti])."""
+import numpy as np
+
 try:
     import nibabel as nib
     have_nibabel=True
@@ -23,17 +25,18 @@ def load_nifti_volume_np(fname, as_byte=False, dtype=None):
 
     _require_nibabel()
 
+    """dtype: numpy dtype name, None (float64) or 'native' (the file's own type, float if scaled)"""
     x = nib.load(fname)
-    volume = x.get_fdata().squeeze().transpose([2,1,0]).copy()
     aff = x.affine
-
-    header = x.header ### not used
 
     if as_byte:
         dtype='uint8'
     elif dtype is None:
         dtype='float64'
 
+    if dtype == 'native':
+        return np.asanyarray(x.dataobj).squeeze().transpose([2,1,0]).copy(), aff
+    volume = x.get_fdata().squeeze().transpose([2,1,0])
     return volume.astype(dtype), aff
 
 

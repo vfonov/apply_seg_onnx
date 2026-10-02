@@ -6,7 +6,27 @@ Volume preparation utilities for 3D MRI brain segmentation inference.
 All functions use NumPy only (no PyTorch dependency).
 """
 
+import warnings
+
 import numpy as np
+
+_INT_DTYPES_UNSIGNED = (np.uint8, np.uint16, np.uint32)
+_INT_DTYPES_SIGNED = (np.int8, np.int16, np.int32)
+
+
+def smallest_int_dtype(values):
+    """
+    Smallest integer dtype (at most 32 bits, as supported by MINC) that holds all values:
+    uint8/uint16/uint32 for non-negative values, int8/int16/int32 otherwise.
+    Falls back to float64 with a warning when 32 bits are not enough.
+    """
+    values = np.asarray(values)
+    lo, hi = (int(values.min()), int(values.max())) if values.size else (0, 0)
+    for dt in (_INT_DTYPES_UNSIGNED if lo >= 0 else _INT_DTYPES_SIGNED):
+        if np.iinfo(dt).min <= lo and hi <= np.iinfo(dt).max:
+            return np.dtype(dt)
+    warnings.warn(f"integer values in [{lo}, {hi}] do not fit in 32 bits, using float64")
+    return np.dtype(np.float64)
 
 
 def autonorm_np(arr):

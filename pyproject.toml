@@ -30,3 +30,11 @@ packages = ["apply_seg_onnx"]
 
 [tool.setuptools.dynamic]
 version = { attr = "apply_seg_onnx.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "gpu: needs onnxruntime CUDAExecutionProvider and a GPU (skipped otherwise)",
+    "reference: cross-checks against MONAI (skipped if monai is not installed)",
+]

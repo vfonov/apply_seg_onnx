@@ -16,7 +16,7 @@ import traceback
 import numpy as np
 
 from .io import load_volume_np, save_volume, format_history
-from .volume import (autonorm_np, maxnorm_np, mean_std_normalize_np,
+from .volume import (smallest_int_dtype, autonorm_np, maxnorm_np, mean_std_normalize_np,
                      apply_cropvol, apply_padvol, undo_cropvol, undo_padvol,
                      parse_bracket_input,
                      reorient_to, reorient_back, affine_spacing, foreground_bbox,
@@ -974,7 +974,7 @@ def segment_with_onnx_batched(in_scans, out_segs,
 
                     if label_values is not None and not continuous:
                         # class index -> output label value
-                        dst_out_ = label_values.astype(np.uint8 if label_values.max() < 256 else np.int32)[dst_out_]
+                        dst_out_ = label_values.astype(smallest_int_dtype(label_values))[dst_out_]
 
                     save_volume(out_seg, dst_out_, out_aff, ref_fname=info['ref_file'], history=history)
 
