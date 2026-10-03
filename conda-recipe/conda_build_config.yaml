@@ -1,0 +1,8 @@
+# minc2_simple comes in two minc-forge packages with the same python module:
+#   minc2-simple     built against the full minc-toolkit-v2
+#   minc2-simple-sa  standalone, depends only on libminc
+# conda has no "either A or B" requirement, so one apply_seg_onnx build is made per package
+# (build strings minc2_simple_<n> / minc2_simple_sa_<n>); the solver picks the one that fits the environment.
+minc2_simple_pkg:
+  - minc2-simple-sa
+  - minc2-simple

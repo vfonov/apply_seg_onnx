@@ -14,10 +14,14 @@ dependencies = [
     "numpy",
     "scipy",
     "onnx",
-    "onnxruntime",   # or onnxruntime-gpu (see README)
+    # ONNX Runtime >= 1.18 (CUDA option use_tf32) is required but not listed here: it is distributed as
+    # onnxruntime (CPU) or onnxruntime-gpu, which provide the same module and must not be installed together.
+    # Choose with the extras below; conda-forge's onnxruntime (also its CUDA builds) works as is.
 ]
 
 [project.optional-dependencies]
+cpu = ["onnxruntime>=1.18"]
+gpu = ["onnxruntime-gpu>=1.18"]
 nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key (MindGlide pipeline)
 progress = ["tqdm"]                    # --progress
 all = ["nibabel", "tqdm"]

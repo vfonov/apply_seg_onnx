@@ -3,6 +3,7 @@
 With the pointwise model and raw intensities the expected labels are pointwise_labels(input as loaded).
 """
 import csv
+import sys
 
 import numpy as np
 import pytest
@@ -170,6 +171,24 @@ def test_mindglide_pipeline_restores_geometry(tmp_path, scan, pointwise_model):
     assert seg.shape == d.shape and np.allclose(seg_aff, aff)
     assert set(np.unique(seg)) <= {0, 1, 2} and (seg > 0).any()
     assert not seg[d == 0].any() or (seg[d == 0] > 0).mean() < 0.05
+
+
+@pytest.mark.parametrize('axcodes', ['RAS', 'LPI'])
+def test_mindglide_pipeline_minc_without_nibabel(tmp_path, scan, pointwise_model, monkeypatch, axcodes):
+    """`reorient` on a MINC input needs no nibabel and gives the same result as with nibabel"""
+    fn, d, aff = scan('in.mnc', shape=(12, 24, 28), aff=np.diag([1.0, 1.0, 2.0, 1.0]))
+    s = settings_for(pointwise_model, reorient=axcodes, crop_foreground=True, resample='mindglide', largest=True,
+                     use_gaussian_weights=True, sigma_scale=0.125)
+    out = str(tmp_path / 'seg.mnc')
+    if have_nibabel:
+        I.segment_with_onnx([fn], str(tmp_path / 'seg_nib.mnc'), s)
+    monkeypatch.setitem(sys.modules, 'nibabel', None)
+    I.segment_with_onnx([fn], out, s)
+    seg, seg_aff = load_labels(out)
+    assert seg.shape == d.shape and np.allclose(seg_aff, aff)
+    assert set(np.unique(seg)) <= {0, 1, 2} and (seg > 0).any()
+    if have_nibabel:
+        assert np.array_equal(seg, load_labels(str(tmp_path / 'seg_nib.mnc'))[0])
 
 
 def test_constant_channel(tmp_path, scan, pointwise_model):

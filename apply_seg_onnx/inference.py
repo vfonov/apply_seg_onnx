@@ -518,7 +518,7 @@ def segment_with_patches_overlap(
         output_fuzzy=output_fuzzy.transpose([0,1,4,3,2]).copy()
     return output_fuzzy 
 
-def mindglide_preprocess(data, aff, settings, ctx=None):
+def mindglide_preprocess(data, aff, settings, ctx=None, minc=False):
     """
     MindGlide-style preprocessing (mindglide/transforms.py), each step enabled by a config key:
         reorient ("RAS"/None), crop_foreground, resample ("mindglide"/None) + spacing_float32,
@@ -527,6 +527,7 @@ def mindglide_preprocess(data, aff, settings, ctx=None):
         data: volume as returned by load_volume_np (reversed voxel order, k,j,i)
         aff:  4x4 voxel-to-world affine
         ctx:  geometry from a previous call, to apply the same reorient/crop/resample to another channel
+        minc: data comes from a MINC file (standard order, RAS): `reorient` needs no nibabel
     Returns:
         (array to feed to the model, ctx for mindglide_postprocess*); with none of the keys set
         `data` is returned unchanged and ctx is None
@@ -542,12 +543,12 @@ def mindglide_preprocess(data, aff, settings, ctx=None):
     arr = np.ascontiguousarray(np.asarray(data, dtype=np.float32).transpose([2, 1, 0]))
     aff = np.asarray(aff, dtype=np.float64)
     if reorient:
-        arr, aff_r, tr = reorient_to(arr, aff, reorient)
+        arr, aff_r, tr = reorient_to(arr, aff, reorient, minc=minc)
     else:
         aff_r, tr = aff, None
 
     if ctx is None:
-        ctx = {'tr': tr, 'full_shape': arr.shape}
+        ctx = {'tr': tr, 'tr_minc': minc, 'full_shape': arr.shape}
         if crop_fg:
             ctx['bb_start'], ctx['bb_end'] = foreground_bbox(arr)
         else:
@@ -581,7 +582,7 @@ def mindglide_postprocess(labels, ctx, n_classes, bck=0):
     bb_start, bb_end = ctx['bb_start'], ctx['bb_end']
     seg[bb_start[0]:bb_end[0], bb_start[1]:bb_end[1], bb_start[2]:bb_end[2]] = labels
     if ctx['tr'] is not None:
-        seg = reorient_back(seg, ctx['tr'])
+        seg = reorient_back(seg, ctx['tr'], minc=ctx['tr_minc'])
     return np.ascontiguousarray(seg.transpose([2, 1, 0]))
 
 
@@ -599,7 +600,7 @@ def mindglide_postprocess_fuzzy(prob, ctx, bck=0):
         full = np.full(ctx['full_shape'], 1.0 if c == bck else 0.0, dtype=np.float32)
         full[bb_start[0]:bb_end[0], bb_start[1]:bb_end[1], bb_start[2]:bb_end[2]] = p
         if ctx['tr'] is not None:
-            full = reorient_back(full, ctx['tr'])
+            full = reorient_back(full, ctx['tr'], minc=ctx['tr_minc'])
         out.append(full.transpose([2, 1, 0]))
     return np.ascontiguousarray(np.stack(out))
 
@@ -657,7 +658,8 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
             assert np.all(np.abs(np.asarray(info['aff']) - np.asarray(aff)) < 1e-3), f"{ch}: affine differs from {info['ref_file']}"
 
         # MindGlide-style reorient/crop/resample/normalize (config keys), same geometry for all channels
-        data, info['prep_ctx'] = mindglide_preprocess(data, aff, settings, info['prep_ctx'])
+        data, info['prep_ctx'] = mindglide_preprocess(data, aff, settings, info['prep_ctx'],
+                                                      minc=ch.endswith('.mnc'))
 
         if ref_aff is not None:
             data, info['new_aff'] = resample_volume(data, aff, ref_data.shape, ref_aff)

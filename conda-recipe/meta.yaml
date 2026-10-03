@@ -1,0 +1,71 @@
+{% set name = "apply_seg_onnx" %}
+{% set version = load_file_regex(load_file="apply_seg_onnx/__init__.py",
+                                 regex_pattern='__version__ = "([^"]+)"',
+                                 from_recipe_dir=False).group(1) %}
+
+# build: conda build -c minc-forge -c conda-forge conda-recipe
+#   minc2-simple / minc2-simple-sa come from minc-forge, everything else from conda-forge;
+#   one build per minc2_simple package (conda_build_config.yaml)
+
+package:
+  name: "{{ name|lower }}"
+  version: "{{ version }}"
+
+source:
+  path: ..
+  #git_url: gitea:apply_seg_onnx.git
+  #git_rev: main
+
+build:
+  number: 0
+  noarch: python
+  string: "{{ minc2_simple_pkg | replace('-', '_') }}_{{ PKG_BUILDNUM }}"
+  # lower priority for the full-toolkit build: a fresh install picks the minimal minc2-simple-sa one
+  track_features:                                          # [minc2_simple_pkg == "minc2-simple"]
+    - apply_seg_onnx_minc2_simple                          # [minc2_simple_pkg == "minc2-simple"]
+  script: "{{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv"
+  entry_points:
+    - apply_seg_onnx = apply_seg_onnx.inference:main
+
+requirements:
+  host:
+    - python >=3.9
+    - pip
+    - setuptools >=61
+  run:
+    - python >=3.9
+    - {{ minc2_simple_pkg }}          # minc-forge: minc2-simple-sa (minimal) or minc2-simple (full toolkit)
+    - numpy
+    - scipy
+    - onnx
+    - onnxruntime >=1.18       # CUDA option use_tf32; conda-forge builds include CUDA variants
+    # optional, not pulled in: nibabel (NIfTI I/O and NIfTI "reorient"; MINC needs none), tqdm (--progress)
+
+test:
+  source_files:
+    - tests
+    - pyproject.toml           # pytest settings and markers
+  requires:
+    - pip
+    - pytest
+    - nibabel                  # exercise the optional NIfTI code paths too
+  imports:
+    - apply_seg_onnx
+    - apply_seg_onnx.inference
+    - apply_seg_onnx.onnx_tiled
+  commands:
+    - pip check
+    - apply_seg_onnx --help
+    # against the installed package; GPU tests need a GPU, MONAI cross-checks are skipped without monai
+    - python -m pytest -q -m "not gpu" tests
+
+about:
+  summary: 'ONNX Runtime inference of 3D MRI segmentation models (MINC/NIfTI) without PyTorch'
+  description: |
+    Sliding-window and whole-volume ONNX Runtime inference for 3D brain MRI segmentation
+    (MindGlide, WMH-SynthSeg, ...), with MindGlide-compatible pre/post-processing,
+    exact tiled GroupNorm inference, MINC I/O through minc2-simple and optional NIfTI I/O (nibabel).
+
+extra:
+  recipe-maintainers:
+    - vfonov

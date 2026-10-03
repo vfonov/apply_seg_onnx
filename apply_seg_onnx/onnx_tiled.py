@@ -18,7 +18,11 @@ GroupNorm is recognised in the form produced by torch.onnx.export:
 import numpy as np
 import onnx
 from onnx import helper, numpy_helper, TensorProto
-import onnxruntime
+try:
+    import onnxruntime
+except ImportError as e:
+    raise ImportError("apply_seg_onnx needs ONNX Runtime >= 1.18: pip install 'apply_seg_onnx[gpu]' (onnxruntime-gpu) "
+                      "or 'apply_seg_onnx[cpu]' (onnxruntime), or conda install -c conda-forge onnxruntime") from e
 
 LOCAL_OPS = {'Conv', 'LeakyRelu', 'Relu', 'Sigmoid', 'Tanh', 'Elu', 'MaxPool', 'AveragePool', 'Resize',
              'Concat', 'Add', 'Mul', 'Sub', 'Div', 'Identity'}

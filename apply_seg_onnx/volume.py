@@ -192,16 +192,37 @@ def parse_bracket_input(spec):
 # reverse of the (k,j,i) order returned by load_volume_np.
 # ---------------------------------------------------------------------------
 
-def reorient_to(arr, aff, axcodes='RAS'):
+def _import_nibabel():
+    try:
+        import nibabel as nib
+    except ImportError as e:
+        raise ImportError("reorienting NIfTI volumes needs nibabel: pip install nibabel (or apply_seg_onnx[nifti])") from e
+    return nib
+
+
+def reorient_to(arr, aff, axcodes='RAS', minc=False):
     """
     Reorient a voxel-ordered (i,j,k) array to the given axis codes, like MONAI Orientationd.
+
+    minc: the array comes from a MINC file read in standard order (positive steps, i,j,k = x,y,z),
+          i.e. it is RAS: the transform follows from `axcodes` alone, without nibabel.
+          Otherwise (NIfTI) the orientation is derived from the affine with nibabel.
 
     Returns:
         tuple: (reoriented_array, new_affine, transform) where transform undoes
                the operation via reorient_back()
     """
-    import nibabel as nib
     aff = np.asarray(aff, dtype=np.float64)
+    if minc:
+        tr = _ras_to_axcodes(axcodes)
+        # voxel index in the new array -> voxel index in the old one
+        new_to_old = np.zeros((4, 4))
+        new_to_old[3, 3] = 1.0
+        for i, (j, flip) in enumerate(tr):
+            new_to_old[i, int(j)] = flip
+            new_to_old[i, 3] = arr.shape[i] - 1 if flip < 0 else 0
+        return np.ascontiguousarray(_apply_ornt(arr, tr)), aff @ new_to_old, tr
+    nib = _import_nibabel()
     ornt = nib.orientations.io_orientation(aff)
     tr = nib.orientations.ornt_transform(ornt, nib.orientations.axcodes2ornt(axcodes))
     new_arr = nib.orientations.apply_orientation(arr, tr)
@@ -209,10 +230,31 @@ def reorient_to(arr, aff, axcodes='RAS'):
     return np.ascontiguousarray(new_arr), new_aff, tr
 
 
-def reorient_back(arr, tr):
-    """Undo reorient_to() using the transform it returned."""
-    import nibabel as nib
+def reorient_back(arr, tr, minc=False):
+    """Undo reorient_to() using the transform it returned (same `minc` as there)."""
+    if minc:
+        return np.ascontiguousarray(_apply_ornt(arr, _inverse_ornt(tr)))
+    nib = _import_nibabel()
     return np.ascontiguousarray(nib.orientations.apply_orientation(arr, _inverse_ornt(tr)))
+
+
+def _ras_to_axcodes(axcodes):
+    """Transform (nibabel format: row i = [new position of axis i, +1/-1 flip]) from RAS to e.g. 'LPS'."""
+    axes = [next((i for i, pair in enumerate(('LR', 'PA', 'IS')) if code in pair), None) for code in axcodes]
+    if sorted(axes, key=str) != [0, 1, 2]:
+        raise ValueError(f"axis codes {axcodes!r} must name each of L/R, P/A, I/S once")
+    tr = np.zeros((3, 2))
+    for j, (i, code) in enumerate(zip(axes, axcodes)):
+        tr[i] = [j, 1.0 if code in 'RAS' else -1.0]
+    return tr
+
+
+def _apply_ornt(arr, tr):
+    """Flip axes with -1, then move axis i to position tr[i, 0] (nibabel apply_orientation)."""
+    for ax, flip in enumerate(tr[:, 1]):
+        if flip < 0:
+            arr = np.flip(arr, axis=ax)
+    return arr.transpose(np.argsort(tr[:, 0]))
 
 
 def _inverse_ornt(tr):

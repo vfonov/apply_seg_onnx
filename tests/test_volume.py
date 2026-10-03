@@ -1,4 +1,6 @@
 """apply_seg_onnx.volume: normalizations, crop/pad, MindGlide/MONAI-compatible helpers."""
+import sys
+
 import numpy as np
 import pytest
 
@@ -118,6 +120,60 @@ def test_reorient_permuted_axes():
     assert np.allclose(np.abs(new_aff[:3, :3]), np.eye(3)) and np.all(np.diag(new_aff)[:3] > 0)
     assert np.array_equal(V.reorient_back(r, tr), a)
 
+
+# MINC (standard order: positive steps, i,j,k = x,y,z, i.e. RAS): the transform follows from the axis codes alone
+AXCODES = ['RAS', 'LPS', 'LPI', 'RPI', 'SAR', 'PIL', 'ASL']
+AFF_MINC = np.array([[2.0, 0, 0, -10], [0, 1.5, 0, -20], [0, 0, 1.0, -30], [0, 0, 0, 1]])
+
+
+@pytest.fixture
+def no_nibabel(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'nibabel', None)  # any "import nibabel" now raises ImportError
+
+
+@pytest.mark.parametrize('axcodes', AXCODES)
+def test_reorient_minc_without_nibabel(no_nibabel, axcodes):
+    a = np.random.default_rng(5).random((5, 6, 7))
+    r, new_aff, tr = V.reorient_to(a, AFF_MINC, axcodes, minc=True)
+    assert new_aff.dtype == np.float64
+    # every voxel keeps its world coordinate
+    for ijk in np.ndindex(*r.shape):
+        old = np.linalg.solve(AFF_MINC, new_aff @ np.array([*ijk, 1.0]))
+        assert r[ijk] == a[tuple(np.rint(old[:3]).astype(int))]
+    # axis k of the result points along axcodes[k]
+    for k, code in enumerate(axcodes):
+        w = 'RAS'.index(code) if code in 'RAS' else 'LPI'.index(code)
+        assert np.sign(new_aff[w, k]) == (1 if code in 'RAS' else -1)
+    assert np.array_equal(V.reorient_back(r, tr, minc=True), a)
+
+
+def test_reorient_minc_ras_is_identity(no_nibabel):
+    a = np.random.default_rng(6).random((4, 5, 6))
+    r, new_aff, tr = V.reorient_to(a, AFF_MINC, 'RAS', minc=True)
+    assert np.array_equal(r, a) and np.array_equal(new_aff, AFF_MINC)
+    assert np.array_equal(tr, [[0, 1], [1, 1], [2, 1]])
+
+
+@pytest.mark.parametrize('axcodes', AXCODES)
+def test_reorient_minc_matches_nibabel(axcodes):
+    pytest.importorskip('nibabel')
+    a = np.random.default_rng(7).random((5, 6, 7))
+    r1, aff1, tr1 = V.reorient_to(a, AFF_MINC, axcodes, minc=True)
+    r2, aff2, tr2 = V.reorient_to(a, AFF_MINC, axcodes)
+    assert np.array_equal(r1, r2) and np.array_equal(tr1, tr2) and np.allclose(aff1, aff2, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize('axcodes', ['RA', 'RAX', 'RRS', 'LAR', 'RASI', 'ras'])
+def test_reorient_minc_invalid_axcodes(axcodes):
+    with pytest.raises(ValueError):
+        V.reorient_to(np.zeros((2, 3, 4)), AFF_MINC, axcodes, minc=True)
+
+
+def test_reorient_nifti_without_nibabel(no_nibabel):
+    with pytest.raises(ImportError, match='nibabel'):
+        V.reorient_to(np.zeros((2, 3, 4)), AFF_MINC, 'RAS')
+    with pytest.raises(ImportError, match='nibabel'):
+        V.reorient_back(np.zeros((2, 3, 4)), np.array([[0, 1], [1, 1], [2, 1.0]]))
 
 # ---------------------------------------------------------------------------------------------------------
 # MindGlide resampling

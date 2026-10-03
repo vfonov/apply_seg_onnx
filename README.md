@@ -12,15 +12,31 @@ Pipelines are selected by a JSON config file. They include:
 
 ## Installation
 
+First install `minc2_simple`, which is not on PyPI: `conda install -c minc-forge minc2-simple-sa`, or build it from https://github.com/vfonov/minc2-simple.
+
+Then choose the ONNX Runtime build with an extra. `onnxruntime` and `onnxruntime-gpu` provide the same module, so only one of them may be installed:
+
 ```bash
-pip install .              # minc2_simple, numpy, scipy, onnx, onnxruntime
-pip install .[nifti]       # + nibabel: .nii.gz I/O, "reorient" (MindGlide pipeline)
-pip install .[all]         # + tqdm (--progress)
+pip install '.[gpu]'          # onnxruntime-gpu >= 1.18 (CUDA)
+pip install '.[cpu]'          # onnxruntime >= 1.18 (CPU only)
+pip install .                 # ONNX Runtime already installed (e.g. conda-forge onnxruntime, also its CUDA builds)
+pip install '.[gpu,all]'      # + nibabel (.nii.gz I/O) and tqdm (--progress)
 ```
 
-`minc2_simple` is not on PyPI. Install it from https://github.com/vfonov/minc2-simple first.
+The extras `nifti` (nibabel) and `progress` (tqdm) can also be chosen separately. MINC input needs neither: all config keys, `reorient` included, work on `.mnc` without nibabel.
 
-For the GPU, use an onnxruntime build that has the CUDA execution provider: `onnxruntime-gpu` from PyPI, or `onnxruntime` from conda-forge. Do not install the CPU `onnxruntime` wheel next to `onnxruntime-gpu`. If `onnxruntime-gpu` is already present, install this package with `pip install --no-deps .`.
+ONNX Runtime 1.18 or newer is required: the CUDA execution provider is configured with `use_tf32`, an option added in 1.18. Results were verified bit-identical with 1.30; other versions may differ by floating-point noise. To check which providers you have: `python -c "import onnxruntime; print(onnxruntime.get_available_providers())"`.
+
+### conda
+
+The recipe in `conda-recipe/` builds a noarch package. `minc2_simple` comes from minc-forge as either `minc2-simple-sa` (depends only on libminc) or `minc2-simple` (full minc-toolkit-v2). Conda can't require one of two packages, so two builds are made, `minc2_simple_sa_0` and `minc2_simple_0`. The solver takes the one matching what is installed; in a fresh environment it prefers the `-sa` build. Everything else comes from conda-forge:
+
+```bash
+conda build -c minc-forge -c conda-forge conda-recipe
+conda install -c minc-forge -c conda-forge --use-local apply_seg_onnx nibabel tqdm   # nibabel, tqdm optional
+```
+
+The build tests run the pytest suite against the installed package, without the `gpu` tests. minc-forge has `minc2-simple-sa` for Python 3.9–3.12, and `minc2-simple` up to 3.13.
 
 You can also run the package without installing it:
 
@@ -51,7 +67,7 @@ All of these keys are off by default.
 
 | key | effect |
 |---|---|
-| `reorient` | Reorient to these axis codes, e.g. `"RAS"`, like MONAI `Orientationd`, and reorient back afterwards (needs nibabel). |
+| `reorient` | Reorient to these axis codes, e.g. `"RAS"`, like MONAI `Orientationd`, and reorient back afterwards. For NIfTI, the orientation comes from the affine through nibabel. MINC is read in standard order (positive steps, i,j,k = x,y,z = RAS), so the flips and permutation follow from the axis codes alone, without nibabel. For `"RAS"` this is the identity. |
 | `crop_foreground` | Crop to the bounding box of voxels > 0, then un-crop the result. |
 | `resample: "mindglide"` | Resample on the voxel grid the way MindGlide does (`scipy.ndimage.zoom`, bit-identical to MindGlide). |
 | `spacing_float32` | Round the affine to float32 before MindGlide's exact spacing test. |
@@ -68,7 +84,7 @@ All of these keys are off by default.
 |---|---|
 | `inference` | Command line (`main`), `make_onnx_sessions`, `segment_whole`, `segment_with_patches_overlap` (MONAI window layout), `segment_with_onnx[_batched]`, MindGlide pre/post-processing |
 | `onnx_tiled` | `TiledGroupNormSession`: drop-in for `InferenceSession.run()` that cuts the graph at every GroupNorm, runs the local stages tile by tile with a halo, and computes exact statistics from per-tile Σx, Σx² |
-| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, MindGlide resample/recover (`_resize`, on `scipy.ndimage.zoom`), MONAI window starts and Gaussian map (numpy/scipy; nibabel imported lazily) |
+| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, MindGlide resample/recover (`_resize`, on `scipy.ndimage.zoom`), MONAI window starts and Gaussian map (numpy/scipy; nibabel imported lazily, only for NIfTI reorientation) |
 | `postprocess` | `find_largest_component`, `measure_volumes`, `save_measurements` |
 | `io` | `load_volume_np` / `save_volume`, which dispatch on `.mnc` / `.nii.gz` |
 | `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume` |
@@ -89,13 +105,13 @@ The tests need no data files or PyTorch: they build small synthetic ONNX models 
 
 | file | covers |
 |---|---|
-| `test_volume.py` | normalisation, crop/pad, bbox, reorient, MindGlide resample/recovery, window layout and Gaussian weights (`reference`: against MONAI) |
+| `test_volume.py` | normalisation, crop/pad, bbox, reorient (NIfTI with nibabel; MINC without it, checked against nibabel), MindGlide resample/recovery, window layout and Gaussian weights (`reference`: against MONAI) |
 | `test_resize.py` | `_resize` (scipy port of skimage resize) |
 | `test_io.py` | MINC/NIfTI round-trips and affines, metadata/history, missing nibabel, world-space resampling |
 | `test_postprocess.py` | largest component, volume measurements, CSV |
 | `test_onnx_tiled.py` | `TiledGroupNormSession` against plain ORT (`gpu`: on CUDA) |
 | `test_inference.py` | sliding window, whole volume, MindGlide pre/post-processing |
-| `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, CLI |
+| `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, MindGlide pipeline on MINC without nibabel, CLI |
 | `test_package.py` | the package never imports torch |
 
 Markers:
