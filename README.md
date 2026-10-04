@@ -54,11 +54,32 @@ apply_seg_onnx --help                                                           
 
 GPU is used by default (`--cpu` to disable, `--device_id`, `--use_tf32`). `--measure` writes per-label volumes; label names come from the config key `labels_desc`.
 
+### From Python
+
+```python
+import apply_seg_onnx
+
+config = {"models": ["model.onnx"], "n_classes": 3, "patch_sz": 64, "stride": 32}   # keys: see the reference below
+apply_seg_onnx.segment("in.mnc", "seg.mnc", config)                                 # one scan, returns the output path
+apply_seg_onnx.segment(["t1.mnc", "t2.mnc"], "seg.mnc", config, measure="vol.csv")  # channels of a multi-channel model
+apply_seg_onnx.segment_batch(["a.mnc", "b.mnc"], ["a_seg.mnc", "b_seg.mnc"], config, minibatch_size=2)
+
+config = apply_seg_onnx.load_config("cfg.json")                                     # a JSON config file as a dict
+apply_seg_onnx.segment("in.nii.gz", "seg.nii.gz", config, model_prefix="/models/", cpu=True)
+```
+
+Inputs and outputs are file paths (`str` or `pathlib.Path`); the config dict is not modified. Keyword arguments mirror
+the command line: `model_prefix`, `cpu` (default false: GPU), `threads`, `device_id`, `use_tf32`, `measure`, `fuzzy`,
+`history`; `segment_batch` adds `minibatch_size`, `progress`, `recover`, `skip_errors`. Errors are raised
+(`skip_errors=True` reports a failed minibatch and continues, as the command line does without `--crash`).
+`segment_batch` loads the models once for all scans.
+
 ### Example configs (in the replication workspace)
 
 | config | pipeline |
 |---|---|
 | `mindglide_config_conjurer_patch_mk2.json` | The steps below run in this order:<br>1. reorient to RAS<br>2. crop to the nonzero bounding box<br>3. `resample: "mindglide"` to 1 mm<br>4. nonzero z-score<br>5. sliding window 128×128×64 with 50% overlap and Gaussian weights (`gaussian_map: "separable"`)<br>6. recover the labels<br>7. keep the largest component |
+| `synthsr_whole.json`, `synthsr_whole_tta.json` | Regression model on the whole volume, without and with flip-X TTA:<br>1. float64 input, `uniformize_method: "grid"` to 1 mm<br>2. centred padding to multiples of 32 (`pad_center`)<br>3. `normalize_min_max`<br>4. output × 255 clipped to [0, 128] per pass<br>5. unsharp mask (σ 1.5)<br>6. saved on the 1 mm grid |
 | `synthseg_wmh_tiled_tta.json` | WMH-SynthSeg as in `minc_wmh_synthseg.py --trim`:<br>• native grid<br>• x/max normalization<br>• whole volume with exact GroupNorm statistics, run in 128³ tiles (`tiled_groupnorm`)<br>• flip-X TTA<br>• FreeSurfer label values (`label_values`) |
 
 ## Config file reference
@@ -88,6 +109,8 @@ Differences from the original `apply_multi_model_onnx.py` are listed in `CHANGES
 |---|---|---|---|
 | `reference` | none | `-R` | Volume file: the input is resampled onto its grid (linear) before the model. `--model_prefix` is prepended. |
 | `uniformize` | none | `-U` | Voxel size in mm: the input is resampled to isotropic voxels (linear) before the model. |
+| `uniformize_method` | `"affine"` | config only | How `uniformize` resamples. `"affine"`: world-space linear resampling, zero outside the volume, nothing done when the voxels already have that size. `"grid"`: along the array axes, always applied: Gaussian blur of 0.25/factor voxels on the axes that are not upsampled (factor = voxel size / `uniformize`), then linear interpolation at voxel-edge aligned positions clamped to the volume, `ceil(size · factor)` samples per axis; computed in float64. Any other value is an error. |
+| `input_dtype` | `"float32"` | config only | Precision the scans are loaded and resampled in: `"float32"` or `"float64"`. With `"float64"`, `normalize_min_max` in whole-volume mode is also computed in float64. The model is always fed float32. |
 | `save_uniformized` | false | `-S` | Save the output on the `reference` / `uniformize` grid. Otherwise labels are resampled back to the input grid (nearest neighbour). |
 | `resample` | `"legacy"` | config only | `"legacy"`: the only resampling is `uniformize` / `reference`. `"mindglide"`: resample to 1 mm on the voxel grid before the model (cubic spline through `scipy.ndimage.zoom`, truncated target shape; nearest along the slice axis when the spacing ratio is ≥ 3) and bring the labels back class by class. Any other value is an error. |
 | `spacing_float32` | false | config only | With `resample: "mindglide"`: round the affine to float32 before the exact spacing = 1 test, so MINC and NIfTI inputs decide alike. |
@@ -100,13 +123,14 @@ Differences from the original `apply_multi_model_onnx.py` are listed in `CHANGES
 
 ### Intensity normalization
 
-At most one of the first three is applied, in this order of precedence.
+At most one of the first three is applied, in this order of precedence; `normalize_min_max` is used only when none of them is set.
 
 | key | default | flag | meaning |
 |---|---|---|---|
 | `normalize` | false | `--normalize` | Subtract the minimum, divide by the 99th percentile, clip to [0, 1]. |
 | `normalize_max` | false | `--max_normalize` | Divide by the maximum, clip to [0, 1]. |
 | `normalize_mean_std` | false | `--mean_std_normalize` | Subtract the mean and divide by the standard deviation of the voxels > 0 (all voxels are transformed). |
+| `normalize_min_max` | false | config only | Subtract the minimum, divide by the maximum of the result; no clipping. In whole-volume mode it is computed after the padding, so the zeros of the padding count for the minimum. |
 | `normalize_mean_std_nonzero` | false | config only | Z-score of the voxels ≠ 0 only; zeros stay zero. Applied per channel, before the three above. |
 
 ### Whole-volume mode
@@ -117,6 +141,7 @@ At most one of the first three is applied, in this order of precedence.
 | `quant_size` | 64 | `--quant` | The volume size is made a multiple of this. |
 | `trim` | false | `--trim` | false: zero-pad at the end of each axis and cut the result back. true: cut a box out instead; outside it the result is class 0. The box is centred along the first two array axes and starts at 0 along the last one. |
 | `trim_center` | false | config only | With `trim`: centre the box along the last array axis too. |
+| `pad_center` | false | config only | Without `trim`: put the zero padding on both sides of each axis, `floor(d/2)` voxels before and the rest after, instead of at the end. With `augment_tta` the padded volume is flipped, so both passes see the same padding. |
 
 ### Sliding-window mode (when `whole` is false)
 
@@ -147,6 +172,9 @@ At most one of the first three is applied, in this order of precedence.
 | `label_values` | none | config only | List: class index → label value written to the file. The output uses the smallest integer type that holds the values. |
 | `labels_desc` | none | config only | Label names for `--measure`: a list (item *i* names class *i*+1, or `label_values[i+1]` when that key is set), an object `{"value": "name"}`, or the name of a JSON file holding such an object. Without it `--measure` writes nothing. |
 | `fuzzy` | none | `-F` | Prefix for per-class probability maps: `<prefix>_<class>.<ext>`, or `<prefix>_<scan>_<class>.<ext>` for several scans, in the format of the output. |
+| `output_scale` | none | config only | `continuous` models: multiply the output of each model (and of each TTA pass) by this number, before averaging. |
+| `output_clip` | none | config only | `continuous` models: `[low, high]`, clip the output of each model and TTA pass after `output_scale`, before averaging. |
+| `unsharp_sigma`, `unsharp_amount` | none, 1.0 | config only | `continuous` models: unsharp mask on the final volume, `v + amount · (v − blur(v))` with a Gaussian blur of `unsharp_sigma` voxels. Applied on the grid the model ran on, before any resampling back to the input grid. |
 | `history` | command line | – | History string stored in the output; set by the command line. |
 
 ### Order of the steps
@@ -154,22 +182,23 @@ At most one of the first three is applied, in this order of precedence.
 1. Load the scan (all channels on the same grid).
 2. `reorient` → `crop_foreground` → `resample: "mindglide"` → `normalize_mean_std_nonzero`.
 3. `reference` / `uniformize` resampling.
-4. Flip copy for `augment_tta`; `cropvol` or `padvol`.
+4. `pad_center` padding; flip copy for `augment_tta`; `cropvol` or `padvol`.
 5. Model: `whole` (pad or `trim`) or sliding window; axis convention and `normalize*` are applied here.
-6. Average or vote over models; average the flipped pass; argmax.
-7. Undo `cropvol` / `padvol`, then step 2, then step 3 (unless `save_uniformized`).
+6. `output_scale` / `output_clip`; average or vote over models; average the flipped pass; undo `pad_center`; argmax.
+7. `unsharp_sigma`. Undo `cropvol` / `padvol`, then step 2, then step 3 (unless `save_uniformized`).
 8. `largest` → `fuzzy` maps → `mask` → `label_values` → save → `--measure`.
 
 ## Modules
 
 | module | content |
 |---|---|
+| `api` | Python interface: `segment`, `segment_batch`, `load_config` (exported by the package) |
 | `inference` | Command line (`main`), `make_onnx_sessions`, `segment_whole`, `segment_with_patches_overlap`, `segment_with_onnx[_batched]`, geometry pre/post-processing (`preprocess_volume`, `postprocess_labels`, `postprocess_fuzzy`) |
 | `onnx_tiled` | `TiledGroupNormSession`: drop-in for `InferenceSession.run()` that cuts the graph at every GroupNorm, runs the local stages tile by tile with a halo, and computes exact statistics from per-tile Σx, Σx² |
 | `volume` | Normalizations, crop/pad, reorientation, foreground bbox, voxel-grid resample/recover (`_resize`, on `scipy.ndimage.zoom`), window starts and Gaussian map (numpy/scipy; nibabel imported lazily, only for NIfTI reorientation) |
 | `postprocess` | `find_largest_component`, `measure_volumes`, `save_measurements` |
 | `io` | `load_volume_np` / `save_volume`, which dispatch on `.mnc` / `.nii.gz` |
-| `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume` |
+| `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume`, `uniformize_volume_grid` |
 | `nifti_io` | NIfTI I/O through nibabel (optional; raises `ImportError` when it is missing) |
 | `geo` | Affine `decompose` / `compose` |
 
@@ -194,6 +223,8 @@ The tests need no data files or PyTorch: they build small synthetic ONNX models 
 | `test_onnx_tiled.py` | `TiledGroupNormSession` against plain ORT (`gpu`: on CUDA) |
 | `test_inference.py` | sliding window (`legacy` layout against a copy of the original loop, `dense` default, `gaussian_map`), whole volume, geometry pre/post-processing, `resample` modes |
 | `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, geometry pipeline on MINC without nibabel, missing input, CLI |
+| `test_continuous.py` | regression models on files: `pad_center` (with flip TTA and `trim`), `normalize_min_max`, `input_dtype`, `uniformize_method: "grid"`, `output_scale` / `output_clip`, unsharp mask |
+| `test_api.py` | `segment` / `segment_batch` with paths and a config dict: `model_prefix`, measure, errors, config left unmodified |
 | `test_package.py` | the package never imports torch; the MINC writer takes numpy arrays only |
 
 Markers:

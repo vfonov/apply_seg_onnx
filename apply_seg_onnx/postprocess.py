@@ -11,6 +11,21 @@ import json
 import numpy as np
 
 
+def unsharp_mask(volume, sigma, amount=1.0):
+    """
+    Unsharp masking: volume + amount * (volume - Gaussian blur of sigma voxels).
+
+    Args:
+        volume: 3D array in (z, y, x) order; the separable filter passes run in x, y, z order
+    Returns:
+        sharpened array, same dtype and order
+    """
+    from scipy.ndimage import gaussian_filter
+    v = np.ascontiguousarray(volume.transpose([2, 1, 0]))
+    v = v + (v - gaussian_filter(v, sigma * np.ones(3))) * amount
+    return np.ascontiguousarray(v.transpose([2, 1, 0]))
+
+
 def find_largest_component(input, connectivity=3):
     """
     Find the largest connected component in a segmentation.

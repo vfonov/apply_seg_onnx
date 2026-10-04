@@ -5,7 +5,7 @@ import sys
 
 from conftest import ROOT
 
-MODULES = ['inference', 'onnx_tiled', 'volume', 'postprocess', 'io', 'minc_io', 'nifti_io', 'geo']
+MODULES = ['api', 'inference', 'onnx_tiled', 'volume', 'postprocess', 'io', 'minc_io', 'nifti_io', 'geo']
 
 
 def test_no_torch_import():

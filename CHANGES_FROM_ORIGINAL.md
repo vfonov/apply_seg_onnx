@@ -49,6 +49,12 @@ original: `--channels` > 1 uses `params.fill`, which does not exist.
 | `trim_center` | with `whole` + `trim`: centre the box along Z too |
 | `tiled_groupnorm` | tile size for exact tiled whole-volume inference of GroupNorm networks |
 | `label_values` | class index → saved label value (`labels_desc` list then refers to `label_values[1:]`) |
+| `pad_center` | with `whole`, no `trim`: zero padding centred (floor before, rest after) instead of at the end; applied before the TTA flip |
+| `normalize_min_max` | (x − min) / max, no clipping; lowest precedence of the `normalize*` keys |
+| `input_dtype` | `"float32"` (default) or `"float64"`: precision of loading, resampling and `normalize_min_max` |
+| `uniformize_method` | `"affine"` (default) = original `uniformize`; `"grid"` = array-axis resampling with a 0.25/factor voxel blur, edge-aligned clamped linear interpolation, ceil shape |
+| `output_scale`, `output_clip` | `continuous`: scale then clip every model / TTA pass output before averaging |
+| `unsharp_sigma`, `unsharp_amount` | `continuous`: unsharp mask on the final volume |
 
 ## 3. Code structure
 
@@ -57,7 +63,9 @@ original: `--channels` > 1 uses `params.fill`, which does not exist.
 - `segment_with_onnx_batched`: scans may be lists of channels (file names or constants); argument `fuzzy_output`
   (unused flag) replaced by `fuzzy` (prefix).
 - New functions in `inference.py`: `legacy_window_starts`, `resample_mode`, `preprocess_volume`, `postprocess_labels`,
-  `postprocess_fuzzy`, `keep_largest`, `make_onnx_sessions`, `load_scan`, `main`.
+  `postprocess_fuzzy`, `keep_largest`, `make_onnx_sessions`, `load_scan`, `main`, `center_pad_widths`, `undo_center_pad`,
+  `scale_clip_output`, `uniformize_method`, `input_dtype`; `minc_io.uniformize_volume_grid`, `postprocess.unsharp_mask`;
+  `segment_whole` / `segment_with_patches_overlap` take `normalize_min_max`.
   `get_gaussian_weights` is the original.
 - New module `onnx_tiled.py` (`TiledGroupNormSession`).
 - `volume.py` additions: `smallest_int_dtype`, `reorient_to` / `reorient_back`, `affine_spacing`, `foreground_bbox`,
@@ -69,6 +77,9 @@ original: `--channels` > 1 uses `params.fill`, which does not exist.
 
 - Standalone package: `pyproject.toml`, conda recipe, `python -m apply_seg_onnx` / `apply_seg_onnx`, pytest suite.
   `minc.io`, `minc.geo`, `nifti.io` copied in as `minc_io.py`, `geo.py`, `nifti_io.py`.
+- Python interface `apply_seg_onnx.segment(input, output, config)` / `segment_batch(inputs, outputs, config)` /
+  `load_config(path)` (module `api.py`): file paths and a config dict, GPU by default as on the command line, errors
+  raised; thin wrappers of `segment_with_onnx` / `segment_with_onnx_batched`, which are unchanged.
 - numpy/ONNX only. Removed with the copy: `minc_io.load_minc_volume` (torch tensor), `load_nl_xfm`, `load_lin_xfm`,
   the torch-tensor branch of `save_minc_volume` (non-array input is now a `TypeError`), and from `geo.py`
   `create_v2p_matrix` and the augmentation matrix builders (`create_rotation_matrix`, `create_scale_matrix`,

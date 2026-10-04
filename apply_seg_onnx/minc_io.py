@@ -199,4 +199,55 @@ def uniformize_volume(data, v2w, tolerance=0.1, order=1, step=1.0):
         return data, v2w
 
 
+"""
+    Resample volume to the uniform sampling on its own voxel grid
+"""
+def uniformize_volume_grid(data, v2w, step=1.0):
+    """
+    Voxel-grid resampling to `step` mm (always applied, the axes keep their directions):
+    Gaussian blur with sigma = 0.25/factor voxels along the axes that are not upsampled
+    (factor = voxel size / step, so sigma = 0.25 at factor 1), then linear interpolation at
+    voxel-edge aligned positions clamped to the volume, ceil(shape * factor) samples per axis.
+    The computation runs in float64 on the (x, y, z) ordered array; the result has the dtype of `data`.
 
+    Args:
+        data: volume in (z, y, x) order
+        v2w:  4x4 voxel-to-world affine
+    Returns:
+        (resampled volume in (z, y, x) order, its affine)
+    """
+    from scipy.ndimage import gaussian_filter
+    from scipy.interpolate import RegularGridInterpolator
+
+    v2w = np.asarray(v2w, dtype=np.float64)
+    volume = np.ascontiguousarray(np.asarray(data, dtype=np.float64).transpose([2, 1, 0]))
+
+    pixdim = np.sqrt(np.sum(v2w * v2w, axis=0))[:-1]
+    factor = pixdim / np.array([step, step, step], dtype=np.float64)
+    sigmas = 0.25 / factor
+    sigmas[factor > 1] = 0  # no blur when upsampling
+
+    volume = gaussian_filter(volume, sigmas)
+
+    grid = tuple(np.arange(0, n) for n in volume.shape)
+    interpolator = RegularGridInterpolator(grid, volume, method='linear')
+
+    start = - (factor - 1) / (2 * factor)
+    step_ = 1.0 / factor
+    stop = start + step_ * np.ceil(volume.shape * factor)
+
+    coords = []
+    for c in range(3):
+        x = np.arange(start=start[c], stop=stop[c], step=step_[c])
+        x[x < 0] = 0
+        x[x > (volume.shape[c] - 1)] = volume.shape[c] - 1
+        coords.append(x)
+
+    new_volume = interpolator(tuple(np.meshgrid(*coords, indexing='ij', sparse=True)))
+
+    new_v2w = v2w.copy()
+    for c in range(3):
+        new_v2w[:-1, c] = new_v2w[:-1, c] / factor[c]
+    new_v2w[:-1, -1] = new_v2w[:-1, -1] - np.matmul(new_v2w[:-1, :-1], 0.5 * (factor - 1))
+
+    return np.ascontiguousarray(new_volume.transpose([2, 1, 0])).astype(np.asarray(data).dtype, copy=False), new_v2w

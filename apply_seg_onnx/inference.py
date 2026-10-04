@@ -25,9 +25,9 @@ from .volume import (smallest_int_dtype, autonorm_np, maxnorm_np, mean_std_norma
                      grid_recover_labels, grid_recover_prob, nonzero_mean_std_normalize,
                      separable_gaussian_weights,
                      window_starts, pad_to_size)
-from .postprocess import find_largest_component, measure_volumes, save_measurements
+from .postprocess import find_largest_component, measure_volumes, save_measurements, unsharp_mask
 from .onnx_tiled import TiledGroupNormSession
-from .minc_io import resample_volume, uniformize_volume
+from .minc_io import resample_volume, uniformize_volume, uniformize_volume_grid
 
 import onnxruntime
 
@@ -249,7 +249,8 @@ def segment_whole(
     trim=False,
     trim_center=False,
     use_classes=None,
-    channel_last=False
+    channel_last=False,
+    normalize_min_max=False
     ):
     """
     Apply model to dataset of arbitrary size 
@@ -269,9 +270,13 @@ def segment_whole(
         trim_center: centre the trimmed box along Z too (as minc_wmh_synthseg.py); by default Z is not shifted
         use_classes: Use only these classes (for models that produce something else in additional channels)
         channel_last: Whether to use channel last format for input and output
+        normalize_min_max: subtract the minimum, divide by the maximum (in the dtype of dataset, then float32);
+                           used when none of the other normalizations is set
     Returns:
         output_fuzzy: Fuzzy output 
     """
+    # the min-max normalization is computed in the input precision, everything else in float32
+    work_dtype = dataset.dtype if normalize_min_max and not (normalize or normalize_max or normalize_mean_std) else np.dtype('float32')
 
     if continuous:
         out_name = "scan_out"
@@ -297,17 +302,17 @@ def segment_whole(
                             dataset[:,:,
                                     _trim[0]:_trim[0]+target_shape[0], 
                                     _trim[1]:_trim[1]+target_shape[1], 
-                                    _trim[2]:_trim[2]+target_shape[2]]).astype('float32')
+                                    _trim[2]:_trim[2]+target_shape[2]]).astype(work_dtype)
         else:
-            conformed = dataset.astype('float32')
+            conformed = dataset.astype(work_dtype)
     else:
         target_shape = np.ceil(np.array(dataset.shape[2:]) / quant_size).astype(int) * quant_size
 
         if np.any(target_shape != dataset.shape[2:]):
-            conformed = np.zeros( (batch_size,1, *target_shape), dtype='float32')
+            conformed = np.zeros( (batch_size,1, *target_shape), dtype=work_dtype)
             conformed[:,:, :dataset.shape[2], :dataset.shape[3], :dataset.shape[4]] = dataset
         else:
-            conformed = dataset.astype('float32') # to be compatible with spatial expectation of the model
+            conformed = dataset.astype(work_dtype) # to be compatible with spatial expectation of the model
 
     print(f"{dataset.shape=} {conformed.shape=}")
 
@@ -329,6 +334,10 @@ def segment_whole(
         mean = np.mean(conformed[conformed>0])
         std = np.std(conformed[conformed>0])
         conformed = (conformed - mean) / std
+    elif normalize_min_max:
+        # Min-max normalization (0-1 range)
+        conformed = conformed - np.min(conformed)
+        conformed = (conformed / np.max(conformed)).astype(np.float32)
 
     # Run inference
     if channel_last:
@@ -426,7 +435,8 @@ def segment_with_patches_overlap(
         channel_last=False,
         sw_batch_size=1,
         window_layout='dense',
-        gaussian_map='normalized'):
+        gaussian_map='normalized',
+        normalize_min_max=False):
     """
     Apply model to dataset of arbitrary size using sliding window inference
     Args:
@@ -453,6 +463,8 @@ def segment_with_patches_overlap(
                            clamped onto the last position, which is then counted more than once
         gaussian_map: 'normalized' (default) - original map, maximum 1 (get_gaussian_weights());
                       'separable' - product of 1D float32 Gaussians, not normalised (separable_gaussian_weights())
+        normalize_min_max: subtract the minimum, divide by the maximum; used when none of the other
+                      normalizations is set
     Axes shorter than the patch are zero-padded and cropped back.
     """
     if continuous:
@@ -487,6 +499,9 @@ def segment_with_patches_overlap(
         mean = np.mean(dataset[dataset>0])
         std = np.std(dataset[dataset>0])
         dataset = (dataset - mean) / std
+    elif normalize_min_max:
+        dataset = dataset - np.min(dataset)
+        dataset = (dataset / np.max(dataset)).astype(np.float32)
 
     # Axes shorter than the patch are zero-padded (diff//2 before, rest after), cropped back at the end
     dataset, pads = pad_to_size(dataset, patch_sz, axes=(2, 3, 4))
@@ -534,6 +549,8 @@ def segment_with_patches_overlap(
 
         if channel_last:
             in_data = np.ascontiguousarray(in_data.transpose([0, 2, 3, 4, 1]))
+        if in_data.dtype == np.float64:  # input_dtype float64
+            in_data = in_data.astype(np.float32)
 
         # Run inference
         out = model.run([out_name],{'scan':in_data})[0]
@@ -684,6 +701,31 @@ def keep_largest(seg, settings, bck=0):
     return seg
 
 
+def center_pad_widths(shape, quant_size):
+    """Zero padding (before, after) per axis that brings `shape` to multiples of quant_size, centred:
+    floor(diff/2) before, the rest after."""
+    widths = []
+    for n in shape:
+        diff = int(math.ceil(n / quant_size) * quant_size - n)
+        widths.append((diff // 2, diff - diff // 2))
+    return widths
+
+
+def undo_center_pad(out, widths):
+    """Remove the padding of center_pad_widths from (N, C, ...) model output."""
+    sl = tuple(slice(b, out.shape[2 + i] - a) for i, (b, a) in enumerate(widths))
+    return out[(slice(None), slice(None)) + sl]
+
+
+def scale_clip_output(out, scale=None, clip=None):
+    """Config `output_scale` / `output_clip` for continuous models: out * scale, then clipped to [lo, hi]."""
+    if scale is not None:
+        out = out * scale
+    if clip is not None:
+        out = np.clip(out, clip[0], clip[1])
+    return out
+
+
 def make_onnx_sessions(models, cpu=True, threads=0, device_id=None, use_tf32=False, tiled=None):
     """Create onnxruntime sessions for a list of model files.
     tiled: tile size (voxels) -> TiledGroupNormSession: whole-volume result of GroupNorm networks with
@@ -702,6 +744,28 @@ def make_onnx_sessions(models, cpu=True, threads=0, device_id=None, use_tf32=Fal
     return [onnxruntime.InferenceSession(m, sess_options, providers=providers) for m in models]
 
 
+def uniformize_method(settings):
+    """
+    Config `uniformize_method` (used with `uniformize`):
+        "affine" (default, also None) - original behaviour: world-space linear resampling, zero outside the volume,
+                                        skipped when the voxel size is within 0.1 mm of the target
+        "grid" - voxel-grid resampling, always applied: blur of the axes that are not upsampled,
+                 linear interpolation clamped to the volume (minc_io.uniformize_volume_grid)
+    """
+    method = settings.get('uniformize_method', None) or 'affine'
+    if method not in ('affine', 'grid'):
+        raise ValueError(f"uniformize_method: expected 'affine' or 'grid', got {method!r}")
+    return method
+
+
+def input_dtype(settings):
+    """Config `input_dtype`: precision the scans are loaded and preprocessed in, "float32" (default) or "float64"."""
+    dtype = settings.get('input_dtype', None) or 'float32'
+    if dtype not in ('float32', 'float64'):
+        raise ValueError(f"input_dtype: expected 'float32' or 'float64', got {dtype!r}")
+    return dtype
+
+
 def load_scan(channels, settings, ref_data=None, ref_aff=None):
     """
     Load one scan for segmentation.
@@ -711,6 +775,7 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
         (array (1, C, ...) to feed to the model, dict with the geometry needed to save the output)
     """
     uniformize = settings.get('uniformize', None)
+    uniformize_grid = uniformize_method(settings) == 'grid'
     if not isinstance(channels, (list, tuple)):
         channels = [channels]
     data_ch = []
@@ -719,7 +784,7 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
         if not isinstance(ch, str):
             data_ch.append(float(ch))  # constant channel, filled once the shape is known
             continue
-        data, aff = load_volume_np(ch, dtype='float32')
+        data, aff = load_volume_np(ch, dtype=input_dtype(settings))
         # make sure all files have the same shape and orientation
         if info['shape'] is None:
             info['ref_file'], info['shape'], info['aff'] = ch, np.array(data.shape), aff
@@ -733,7 +798,9 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
 
         if ref_aff is not None:
             data, info['new_aff'] = resample_volume(data, aff, ref_data.shape, ref_aff)
-        if uniformize is not None:
+        if uniformize is not None and uniformize_grid:
+            data, info['new_aff'] = uniformize_volume_grid(data, aff, step=uniformize)
+        elif uniformize is not None:
             data, info['new_aff'] = uniformize_volume(data, aff, step=uniformize)
         data_ch.append(data)
 
@@ -817,6 +884,14 @@ def segment_with_onnx_batched(in_scans, out_segs,
     window_layout = settings.get('window_layout', 'dense')
     gaussian_map = settings.get('gaussian_map', 'normalized')
     resample_mode(settings)  # validate
+    uniformize_method(settings)
+    input_dtype(settings)
+    normalize_min_max = settings.get('normalize_min_max', False)
+    pad_center = settings.get('pad_center', False)
+    output_scale = settings.get('output_scale', None)
+    output_clip = settings.get('output_clip', None)
+    unsharp_sigma = settings.get('unsharp_sigma', None)
+    unsharp_amount = settings.get('unsharp_amount', 1.0)
     continuous = settings.get('continuous', False)
     trim = settings.get('trim', False)
     channel_last = settings.get('channel_last', False)
@@ -903,6 +978,16 @@ def segment_with_onnx_batched(in_scans, out_segs,
             for grp in groups:
                 infos = [loaded[i][1] for i in grp]
                 batch_inputs = [loaded[i][0] for i in grp]
+                center_pads = None
+                if pad_center and whole and not trim:
+                    # centred zero padding to multiples of quant_size, before the flip copy so that
+                    # both copies see the same padded volume
+                    center_pads = center_pad_widths(batch_inputs[0].shape[2:], quant_size)
+                    if any(p for pp in center_pads for p in pp):
+                        batch_inputs = [np.pad(i, [(0, 0), (0, 0)] + center_pads, mode='constant', constant_values=0)
+                                        for i in batch_inputs]
+                    else:
+                        center_pads = None
                 if augment_tta is not None:
                     # flip along X: last array axis as loaded, first after the geometry preprocessing
                     flip_axis = 2 if infos[0]['prep_ctx'] is not None else 4
@@ -941,7 +1026,8 @@ def segment_with_onnx_batched(in_scans, out_segs,
                             trim=trim,
                             trim_center=trim_center,
                             use_classes=use_classes,
-                            channel_last=channel_last) 
+                            channel_last=channel_last,
+                            normalize_min_max=normalize_min_max)
                     else:
                         dset_out_fuzzy = segment_with_patches_overlap(
                             dset, model, 
@@ -960,7 +1046,12 @@ def segment_with_onnx_batched(in_scans, out_segs,
                             window_layout=window_layout,
                             gaussian_map=gaussian_map,
                             continuous=continuous,
-                            channel_last=channel_last)
+                            channel_last=channel_last,
+                            normalize_min_max=normalize_min_max)
+                    if continuous:
+                        dset_out_fuzzy = scale_clip_output(dset_out_fuzzy, output_scale, output_clip)
+                    if center_pads is not None and augment_tta is None:
+                        dset_out_fuzzy = undo_center_pad(dset_out_fuzzy, center_pads)
                     all_fuzzy_outputs.append(dset_out_fuzzy)
 
                 dset_out = None
@@ -987,6 +1078,9 @@ def segment_with_onnx_batched(in_scans, out_segs,
                                         softmax(dset_out_fuzzy_flip[:,flip_map,:,:,:],axis=1) * 0.5 # remap classes
                 elif fuzzy is not None and not continuous and not dist:
                     dset_out_fuzzy = softmax(dset_out_fuzzy, axis=1)
+
+                if center_pads is not None and augment_tta is not None:
+                    dset_out_fuzzy = undo_center_pad(dset_out_fuzzy, center_pads)  # after flipping back
 
                 if continuous:
                     dset_out = dset_out_fuzzy
@@ -1023,6 +1117,8 @@ def segment_with_onnx_batched(in_scans, out_segs,
                     dst_out_ = np.ascontiguousarray(dset_out[k].squeeze(), dtype=np.float32 if continuous else np.uint8)
                     # undo the geometry preprocessing
                     dst_out_ = postprocess_labels(dst_out_, info['prep_ctx'], use_classes or n_classes, bck)
+                    if continuous and unsharp_sigma:
+                        dst_out_ = unsharp_mask(dst_out_, unsharp_sigma, unsharp_amount)
 
                     if not save_uniformized and (uniformize is not None or ref_aff is not None) and np.any(np.array(dst_out_.shape) != orig_shape):
                         dst_out_ = resample_volume(dst_out_, new_aff, orig_shape, orig_aff, order=0, fill=bck)[0]

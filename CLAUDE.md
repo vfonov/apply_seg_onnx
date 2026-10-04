@@ -6,6 +6,7 @@ ONNX Runtime segmentation inference package, see README.md (module index, config
 - numpy/ONNX only: nothing may import `torch` or carry torch-tensor code paths.
 - Defaults reproduce the original `apply_multi_model_onnx.py` except `window_layout` (default `"dense"`; `"legacy"` = original); every difference is listed in `CHANGES_FROM_ORIGINAL.md` (update it with any change of behaviour).
 - Required deps: minc2_simple, numpy, scipy, onnx, ONNX Runtime >= 1.18 (CUDA option `use_tf32`). ONNX Runtime is a pip extra (`[cpu]` onnxruntime / `[gpu]` onnxruntime-gpu), not a plain dependency, because the two distributions clash; the conda recipe requires `onnxruntime >=1.18`. Keep `pyproject.toml` and `conda-recipe/meta.yaml` in sync. nibabel and tqdm are optional and imported lazily / guarded; `.mnc` input must never need nibabel (MINC `reorient` uses the fixed standard-order layout, `volume.reorient_to(..., minc=True)`).
+- Python interface: `apply_seg_onnx.segment` / `segment_batch` / `load_config` (`api.py`): file paths + config dict; keep its keyword arguments in step with the command line.
 - New behaviour goes behind config keys (default off) so existing configs keep their results.
 - Never install packages; tell the user what is missing.
 - Tests: `python -m pytest` (synthetic ONNX models built in `tests/conftest.py`; markers `gpu`, `reference`).
