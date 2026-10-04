@@ -4,3 +4,9 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# example models and test data: distributed as a separate archive (examples/README.md)
+/examples/models/
+/examples/data/
+*.tar
+*.tar.gz

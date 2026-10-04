@@ -1,0 +1,28 @@
+{
+    "models": [
+        "synthsr_v20_230130_batch.onnx"
+    ],
+    "continuous": true,
+    "channel_last": true,
+    "whole": true,
+    "trim": false,
+    "quant_size": 32,
+    "pad_center": true,
+    "nibabel": true,
+    "freesurfer": false,
+    "input_dtype": "float64",
+    "uniformize": 1.0,
+    "uniformize_method": "grid",
+    "save_uniformized": true,
+    "normalize": false,
+    "normalize_max": false,
+    "normalize_mean_std": false,
+    "normalize_min_max": true,
+    "output_scale": 255,
+    "output_clip": [
+        0,
+        128
+    ],
+    "unsharp_sigma": 1.5,
+    "unsharp_amount": 1.0
+}

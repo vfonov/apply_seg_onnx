@@ -40,4 +40,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "gpu: needs onnxruntime CUDAExecutionProvider and a GPU (skipped otherwise)",
+    "examples: example pipelines on a real scan; needs the example data archive (skipped otherwise)",
 ]

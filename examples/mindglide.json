@@ -1,0 +1,51 @@
+{
+  "models": [
+    "_20240404_conjurer_trained_dice_7733.onnx"
+  ],
+  "n_classes": 20,
+  "patch_sz": [
+    128,
+    128,
+    64
+  ],
+  "bck": 0,
+  "crop": 0,
+  "stride": [
+    64,
+    64,
+    32
+  ],
+  "use_gaussian_weights": true,
+  "sigma_scale": 0.125,
+  "sw_batch_size": 4,
+  "window_layout": "dense",
+  "gaussian_map": "separable",
+  "reorient": "RAS",
+  "crop_foreground": true,
+  "resample": "mindglide",
+  "spacing_float32": true,
+  "normalize_mean_std_nonzero": true,
+  "largest": true,
+  "largest_connectivity": 1,
+  "labels_desc": [
+    "CSF",
+    "Ventricles_3_4_5",
+    "DGM",
+    "Pons",
+    "Brainstem",
+    "Cerebellum",
+    "Temporal_lobe",
+    "Temporal_horn_lateral_ventricle",
+    "Lateral_ventricle",
+    "Optic_chiasm",
+    "Cerebellar_vermis",
+    "Corpus_callosum",
+    "White_matter",
+    "Frontal_lobe_GM",
+    "Limbic_cortex_GM",
+    "Parietal_lobe_GM",
+    "Occipital_lobe_GM",
+    "Lesion",
+    "Ventral_diencephalon"
+  ]
+}
