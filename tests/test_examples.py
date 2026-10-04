@@ -20,10 +20,17 @@ def documented_keys():
     return keys
 
 
+# the tests can run against an installed package with only tests/ copied: no examples or README then
+needs_examples = pytest.mark.skipif(not CONFIGS or not os.path.exists(os.path.join(ROOT, 'README.md')),
+                                    reason='examples/*.json and README.md are not next to tests/')
+
+
+@needs_examples
 def test_examples_present():
     assert len(CONFIGS) >= 4
 
 
+@needs_examples
 @pytest.mark.parametrize('path', CONFIGS, ids=os.path.basename)
 def test_example_config(path):
     with open(path) as f:

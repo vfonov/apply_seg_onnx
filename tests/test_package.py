@@ -13,13 +13,14 @@ def test_no_torch_import():
     code = ('import sys, importlib; '
             + '; '.join(f'importlib.import_module("apply_seg_onnx.{m}")' for m in MODULES)
             + '; sys.exit(1 if "torch" in sys.modules else 0)')
-    subprocess.run([sys.executable, '-c', code], check=True, env={**os.environ, 'PYTHONPATH': ROOT})
+    subprocess.run([sys.executable, '-c', code], check=True, env={**os.environ, 'PYTHONPATH': ROOT + os.pathsep + os.environ.get('PYTHONPATH', '')})
 
 
 def test_no_torch_in_sources():
     """numpy/ONNX only: no source file imports torch or handles torch tensors"""
     import re
-    pkg = os.path.join(ROOT, 'apply_seg_onnx')
+    import apply_seg_onnx
+    pkg = os.path.dirname(os.path.abspath(apply_seg_onnx.__file__))  # also when installed, without the sources
     for name in sorted(os.listdir(pkg)):
         if name.endswith('.py'):
             src = open(os.path.join(pkg, name)).read()

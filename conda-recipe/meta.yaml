@@ -45,6 +45,11 @@ test:
   source_files:
     - tests
     - pyproject.toml           # pytest settings and markers
+    - README.md                # example configs are checked against the config reference
+    - examples/mindglide.json
+    - examples/wmh_synthseg.json
+    - examples/synthsr.json
+    - examples/synthsr_no_tta.json
   requires:
     - pip
     - pytest
@@ -56,8 +61,8 @@ test:
   commands:
     - pip check
     - apply_seg_onnx --help
-    # against the installed package; GPU tests need a GPU
-    - python -m pytest -q -m "not gpu" tests
+    # against the installed package; GPU tests need a GPU, the examples marker needs the example data archive
+    - python -m pytest -q -m "not gpu and not examples" tests
 
 about:
   summary: 'ONNX Runtime inference of 3D MRI segmentation models (MINC/NIfTI) without PyTorch'
