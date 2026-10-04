@@ -13,6 +13,8 @@ examples/models/WMH-SynthSeg_v10_231110_new.onnx.data
 examples/models/synthsr_v20_230130_batch.onnx
 examples/data/subject43_1_t2w.mnc
 examples/data/reference/subject43_1_t2w_mindglide.mnc
+examples/data/reference/subject43_1_t2w_mindglide.csv
+examples/data/reference/subject43_1_t2w_wmh_synthseg.csv
 examples/data/reference/subject43_1_t2w_wmh_synthseg.mnc
 examples/data/reference/subject43_1_t2w_synthsr.mnc
 examples/data/reference/subject43_1_t2w_synthsr_no_tta.mnc"

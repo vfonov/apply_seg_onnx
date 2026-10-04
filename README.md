@@ -89,7 +89,7 @@ apply_seg_onnx --config examples/mindglide.json --model_prefix examples/models/ 
 | config | model | pipeline |
 |---|---|---|
 | `mindglide.json` | MindGlide brain and lesion segmentation, 20 classes (`_20240404_conjurer_trained_dice_7733.onnx`, exported from the PyTorch checkpoint) | The steps run in this order:<br>1. reorient to RAS<br>2. crop to the nonzero bounding box<br>3. `resample: "mindglide"` to 1 mm<br>4. nonzero z-score<br>5. sliding window 128×128×64 with 50% overlap and Gaussian weights (`gaussian_map: "separable"`)<br>6. recover the labels<br>7. keep the largest component (6-neighbourhood)<br>The original tool runs its convolutions in TF32 on the GPU: add `--use_tf32` to follow it. |
-| `wmh_synthseg.json` | WMH-SynthSeg, 33 classes (`WMH-SynthSeg_v10_231110_new.onnx`) | • native grid, axes in (x, y, z) order<br>• x/max normalization<br>• centred box of multiples of 32 voxels (`trim`, `trim_center`)<br>• whole volume with exact GroupNorm statistics, run in 128³ tiles (`tiled_groupnorm`; about 9.5 GB GPU, 64 needs about 4.5 GB)<br>• flip-X TTA with left ↔ right classes swapped<br>• FreeSurfer label values (`label_values`) |
+| `wmh_synthseg.json` | WMH-SynthSeg, 33 classes (`WMH-SynthSeg_v10_231110_new.onnx`) | • native grid, axes in (x, y, z) order<br>• x/max normalization<br>• zero padding to multiples of 32 voxels, centred (`pad_center`); nothing is cut off<br>• whole volume with exact GroupNorm statistics, run in 128³ tiles (`tiled_groupnorm`; about 9.5 GB GPU, 64 needs about 4.5 GB)<br>• flip-X TTA with left ↔ right classes swapped<br>• FreeSurfer label values (`label_values`) |
 | `synthsr.json` | SynthSR, synthetic 1 mm T1 from any contrast (`synthsr_v20_230130_batch.onnx`) | Regression model on the whole volume with flip-X TTA:<br>1. float64 input, `uniformize_method: "grid"` to 1 mm<br>2. centred padding to multiples of 32 (`pad_center`)<br>3. `normalize_min_max`<br>4. output × 255 clipped to [0, 128] per pass, the two passes averaged<br>5. unsharp mask (σ 1.5)<br>6. saved on the 1 mm grid<br>MINC input only (`reorient` cannot be combined with `uniformize`). |
 | `synthsr_no_tta.json` | SynthSR, the same model | As `synthsr.json` without the flipped pass (no `augment_tta`): half the memory and time. |
 
@@ -246,7 +246,7 @@ see `examples/DATA.md`): they build small synthetic ONNX models on the fly. One 
 | `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, geometry pipeline on MINC without nibabel, missing input, CLI |
 | `test_continuous.py` | regression models on files: `pad_center` (with flip TTA and `trim`), `normalize_min_max`, `input_dtype`, `uniformize_method: "grid"`, `output_scale` / `output_clip`, unsharp mask |
 | `test_api.py` | `segment` / `segment_batch` with paths and a config dict: `model_prefix`, measure, errors, config left unmodified |
-| `test_examples.py` | `examples/*.json`: valid JSON, bare model names, every key documented in this file. Marker `examples`: every example config on the test scan, compared with the reference outputs; skipped without the example data archive |
+| `test_examples.py` | `examples/*.json`: valid JSON, bare model names, every key documented in this file. Marker `examples`: every example config on the test scan, output and `--measure` label volumes compared with the references; skipped without the example data archive |
 | `test_package.py` | the package never imports torch; the MINC writer takes numpy arrays only |
 
 Markers:

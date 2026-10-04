@@ -15,6 +15,7 @@ sha256sum -c examples/data/SHA256SUMS
 | `examples/models/synthsr_v20_230130_batch.onnx` | model of `synthsr.json` and `synthsr_no_tta.json` (made by `synthsr_make_batch_dynamic.py` from the fixed-batch export) |
 | `examples/data/subject43_1_t2w.mnc` | test scan: T2-weighted, 2 mm slices |
 | `examples/data/reference/subject43_1_t2w_<config>.mnc` | output of each example config on the test scan (this package, GPU, fp32) |
+| `examples/data/reference/subject43_1_t2w_<config>.csv` | label volumes in mm³ (`--measure`) of the two segmentation configs |
 
 Run an example:
 
@@ -24,7 +25,7 @@ apply_seg_onnx --config examples/mindglide.json --model_prefix examples/models/ 
 ```
 
 Tests (`python -m pytest -m examples`, part of the plain `python -m pytest` run) run every example config on the scan and
-compare with the reference outputs; they are skipped when the files are absent. The files can live elsewhere: set
+compare the outputs and the measured label volumes with the references; they are skipped when the files are absent. The files can live elsewhere: set
 `APPLY_SEG_ONNX_EXAMPLES` to the directory that contains `models/` and `data/`. `APPLY_SEG_ONNX_TEST_CPU=1` runs
 them on the CPU when a GPU is available.
 

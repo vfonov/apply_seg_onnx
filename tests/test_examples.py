@@ -48,6 +48,17 @@ SCAN = os.path.join(DATA_ROOT, 'data', SCAN_NAME + '.mnc')
 MIN_LABEL_AGREEMENT = 0.9999  # fraction of voxels with the same label
 MAX_MEAN_DIFF = 0.01         # regression outputs: mean and maximum absolute difference, intensity range 0..128
 MAX_DIFF = 0.5
+MAX_VOLUME_DIFF_VOXELS = 10  # label volumes: at most this many voxels per label (GPU fp32 reproduces them exactly,
+                             # a CPU differs by up to 4 voxels)
+
+
+def read_volumes(path):
+    """--measure csv of one scan -> {label name: volume in mm3}"""
+    import csv
+    with open(path, newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    return {k: float(v) for k, v in rows[0].items() if k not in ('scan', 'segmentation')}
 
 
 def example_files(path):
@@ -90,8 +101,14 @@ def test_example_on_scan(path, tmp_path):
         found = np.unique(result)
         assert set(found.tolist()) <= set(allowed)
         assert len(found) > len(allowed) // 2  # most structures are found
-        rows = open(tmp_path / 'volumes.csv').read().strip().splitlines()
-        assert len(rows) == 2 and rows[0].count(',') >= len(config['labels_desc'])
+        # measurements: one volume per named label, equal to its voxel count times the voxel volume
+        volumes = read_volumes(tmp_path / 'volumes.csv')
+        assert set(volumes) == set(config['labels_desc'])
+        voxel = abs(np.linalg.det(aff[:3, :3]))
+        values = config.get('label_values', list(range(config['n_classes'])))
+        for i, label in enumerate(config['labels_desc']):
+            assert volumes[label] == pytest.approx(np.sum(result == values[i + 1]) * voxel, rel=1e-5, abs=1e-3), label
+        assert sum(volumes.values()) > 5e5  # mm3: a brain was segmented
 
     reference = os.path.join(DATA_ROOT, 'data', 'reference', f'{SCAN_NAME}_{name}.mnc')
     if not os.path.exists(reference):
@@ -104,3 +121,9 @@ def test_example_on_scan(path, tmp_path):
     else:
         agreement = np.mean(result == expected)
         assert agreement >= MIN_LABEL_AGREEMENT, agreement
+        reference_csv = os.path.splitext(reference)[0] + '.csv'
+        if os.path.exists(reference_csv):
+            expected_volumes = read_volumes(reference_csv)
+            assert set(volumes) == set(expected_volumes)
+            for label, v in expected_volumes.items():
+                assert abs(volumes[label] - v) <= MAX_VOLUME_DIFF_VOXELS * voxel + 1e-3, (label, volumes[label], v)
