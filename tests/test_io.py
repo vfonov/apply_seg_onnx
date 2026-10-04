@@ -1,5 +1,6 @@
 """apply_seg_onnx.io / minc_io / nifti_io / geo: file round-trips, affines, world-space resampling."""
 import math
+import os
 import re
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 
 from apply_seg_onnx.geo import compose, decompose
 from apply_seg_onnx.io import format_history, load_volume_np, save_volume
+from apply_seg_onnx.io import is_minc, volume_extension
 from apply_seg_onnx.minc_io import resample_volume, uniformize_volume
 from apply_seg_onnx.nifti_io import have_nibabel
 
@@ -165,11 +167,69 @@ def test_format_history():
     assert re.match(r'^\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}>>>apply_seg_onnx in.mnc out.mnc$', h), h
 
 
+@pytest.mark.skipif(not have_nibabel, reason='nibabel not installed')
 def test_unsupported_extension(tmp_path):
-    with pytest.raises(ValueError):
+    """anything that is not MINC goes to nibabel, which does not know every extension"""
+    (tmp_path / 'v.nrrd').write_bytes(b'NRRD0004')
+    with pytest.raises(ValueError, match='Unsupported file format'):
         load_volume_np(str(tmp_path / 'v.nrrd'))
-    with pytest.raises(ValueError):
-        save_volume(str(tmp_path / 'v.nrrd'), np.zeros((2, 2, 2)), np.eye(4))
+    with pytest.raises(ValueError, match='Unsupported file format'):
+        save_volume(str(tmp_path / 'w.nrrd'), np.zeros((2, 2, 2), np.float32), np.eye(4))
+
+
+@pytest.mark.parametrize('name, minc, ext', [
+    ('a.mnc', True, '.mnc'), ('a.minc', True, '.minc'), ('dir.x/a.mnc.gz', True, '.mnc.gz'),
+    ('a.MINC.GZ', True, '.MINC.GZ'), ('a.nii', False, '.nii'), ('a.b.nii.gz', False, '.nii.gz'),
+    ('a.img', False, '.img'), ('a.hdr', False, '.hdr'), ('a.mgz', False, '.mgz'), ('a.mnc.bak', False, '.bak'),
+    ('noext', False, '')])
+def test_format_by_extension(name, minc, ext):
+    assert is_minc(name) is minc
+    assert volume_extension(name) == ext
+
+
+@pytest.mark.parametrize('ext', ['minc', 'mnc.gz', 'minc.gz'])
+def test_minc_other_extensions(tmp_path, ext):
+    fn = str(tmp_path / f'v.{ext}')
+    d = np.random.default_rng(11).integers(0, 200, (5, 6, 7)).astype(np.uint8)
+    save_volume(fn, d, AFFINES['anisotropic'], history='made by a test')
+    with open(fn, 'rb') as f:
+        assert (f.read(2) == b'\x1f\x8b') == ext.endswith('.gz')  # really gzipped
+    d2, aff2 = load_volume_np(fn, dtype='uint8')
+    assert np.array_equal(d, d2) and np.allclose(aff2, AFFINES['anisotropic'])
+    assert sorted(os.listdir(tmp_path)) == [f'v.{ext}']  # no temporary file left
+
+
+@pytest.mark.skipif(not have_nibabel, reason='nibabel not installed')
+def test_minc_output_with_other_reference(tmp_path):
+    """metadata is copied from MINC references only: another format as reference is ignored"""
+    d = np.random.default_rng(12).integers(0, 200, (5, 6, 7)).astype(np.uint8)
+    save_volume(str(tmp_path / 'ref.nii.gz'), d, AFFINES['axial_1mm'])
+    save_volume(str(tmp_path / 'v.mnc'), d, AFFINES['axial_1mm'], ref_fname=str(tmp_path / 'ref.nii.gz'))
+    assert np.array_equal(load_volume_np(str(tmp_path / 'v.mnc'), dtype='uint8')[0], d)
+
+
+@pytest.mark.skipif(not have_nibabel, reason='nibabel not installed')
+@pytest.mark.parametrize('ext', ['nii', 'img', 'hdr', 'mgz'])
+def test_other_formats_roundtrip(tmp_path, ext):
+    fn = str(tmp_path / f'v.{ext}')
+    d = np.random.default_rng(13).random((6, 7, 8)).astype(np.float32)
+    save_volume(fn, d, AFFINES['anisotropic'], history='made by a test')
+    d2, aff2 = load_volume_np(fn, dtype='float32')
+    assert np.array_equal(d, d2) and np.allclose(aff2, AFFINES['anisotropic'], atol=1e-5)
+
+
+@pytest.mark.skipif(not have_nibabel, reason='nibabel not installed')
+def test_analyze_input(tmp_path):
+    """Analyze 7.5 pair written by nibabel: read through either file of the pair, as the same data in NIfTI"""
+    import nibabel as nib
+    d = np.random.default_rng(14).integers(0, 200, (5, 6, 7)).astype(np.int16)  # (k, j, i)
+    aff = np.diag([1.0, 1.5, 2.0, 1.0])
+    nib.save(nib.AnalyzeImage(d.transpose(2, 1, 0).copy(), aff), str(tmp_path / 'a.img'))
+    assert 'Analyze' in type(nib.load(str(tmp_path / 'a.img'))).__name__  # not a NIfTI pair
+    for name in ('a.img', 'a.hdr'):
+        a, aa = load_volume_np(str(tmp_path / name), dtype='int16')
+        assert np.array_equal(a, d)
+        assert np.allclose(np.abs(np.diag(aa)[:3]), [1.0, 1.5, 2.0])  # voxel sizes; Analyze has no full affine
 
 
 # ---------------------------------------------------------------------------------------------------------

@@ -87,5 +87,10 @@ original: `--channels` > 1 uses `params.fill`, which does not exist.
 - `minc_io`: affine returned as `ndarray` (was `np.matrix`); `dtype='native'`; the writer also takes bool, float16,
   (u)int32 and 64-bit integers (was an assertion).
 - `nifti_io`: nibabel is optional (clear `ImportError`), `as_byte` honoured, `dtype='native'`.
+- File format by extension (`io.py`): `.mnc`, `.minc`, `.mnc.gz`, `.minc.gz` (any case) are MINC, every other file
+  goes through nibabel in the format of its extension (was: only `.mnc` and `.nii.gz`, anything else an
+  "Unsupported file format" error; that error now comes only for extensions nibabel does not know). Gzipped MINC
+  output is compressed after writing. MINC output with a non-MINC input no longer fails on copying the metadata
+  (skipped). `fuzzy` maps take the full extension of the output (was `.nii.gz` or `.mnc`).
 - `postprocess`: `find_largest_component(input, connectivity=3)` (same default result, faster count);
   `measure_volumes` reads an existing output in its own integer type (was int16).

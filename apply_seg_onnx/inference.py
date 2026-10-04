@@ -16,7 +16,7 @@ import traceback
 
 import numpy as np
 
-from .io import load_volume_np, save_volume, format_history
+from .io import load_volume_np, save_volume, format_history, is_minc, volume_extension
 from .volume import (smallest_int_dtype, autonorm_np, maxnorm_np, mean_std_normalize_np,
                      apply_cropvol, apply_padvol, undo_cropvol, undo_padvol,
                      parse_bracket_input,
@@ -794,7 +794,7 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
 
         # optional reorient/crop/resample/normalize (config keys), same geometry for all channels
         data, info['prep_ctx'] = preprocess_volume(data, aff, settings, info['prep_ctx'],
-                                                      minc=ch.endswith('.mnc'))
+                                                      minc=is_minc(ch))
 
         if ref_aff is not None:
             data, info['new_aff'] = resample_volume(data, aff, ref_data.shape, ref_aff)
@@ -1133,7 +1133,7 @@ def segment_with_onnx_batched(in_scans, out_segs,
 
                     if fuzzy is not None:
                         fuzzy_prefix = fuzzy if len(in_scans) == 1 else f"{fuzzy}_{b + i}"
-                        fuzzy_ext = '.nii.gz' if out_seg.endswith('.nii.gz') else '.mnc'  # same format as the segmentation
+                        fuzzy_ext = volume_extension(out_seg) or '.mnc'  # same format as the segmentation
                         prob = postprocess_fuzzy(dset_out_fuzzy[k], info['prep_ctx'], bck)
                         for f in range(prob.shape[0]):
                             dset_out_f = prob[f]

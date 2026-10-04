@@ -1,7 +1,8 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""NIfTI volume I/O (numpy) through nibabel, an optional dependency (pip install apply_seg_onnx[nifti])."""
+"""Volume I/O (numpy) through nibabel, an optional dependency (pip install apply_seg_onnx[nifti]):
+NIfTI and every other format nibabel reads (Analyze .img/.hdr, MGH .mgz, ...), chosen by the file extension."""
 import numpy as np
 
 try:
@@ -14,7 +15,8 @@ except ImportError:
 
 def _require_nibabel():
     if not have_nibabel:
-        raise ImportError("NIfTI support needs nibabel: pip install nibabel (or apply_seg_onnx[nifti])")
+        raise ImportError("Files other than MINC (NIfTI, Analyze, ...) need nibabel: pip install nibabel "
+                          "(or apply_seg_onnx[nifti])")
 
 
 
@@ -26,7 +28,10 @@ def load_nifti_volume_np(fname, as_byte=False, dtype=None):
     _require_nibabel()
 
     """dtype: numpy dtype name, None (float64) or 'native' (the file's own type, float if scaled)"""
-    x = nib.load(fname)
+    try:
+        x = nib.load(fname)
+    except nib.filebasedimages.ImageFileError as e:
+        raise ValueError(f"Unsupported file format: {fname} ({e})") from e
     aff = x.affine
 
     if as_byte:
@@ -54,5 +59,9 @@ def save_nifti_volume(fn, data, aff, ref_fname=None, history=None):
     if history is not None:
         out.header['descrip'] = history
 
-    nib.save(out, fn)
+    # nibabel picks the format from the extension (.nii, .nii.gz, .img/.hdr as a NIfTI pair, .mgz, ...)
+    try:
+        nib.save(out, fn)
+    except nib.filebasedimages.ImageFileError as e:
+        raise ValueError(f"Unsupported file format: {fn} ({e})") from e
 

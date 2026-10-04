@@ -11,9 +11,9 @@ Modules:
     onnx_tiled   -- TiledGroupNormSession: exact whole-volume inference of GroupNorm networks in tiles
     volume       -- intensity normalization, crop/pad, reorientation, voxel-grid resampling and sliding-window helpers
     postprocess  -- largest connected component, label volume measurements
-    io           -- load_volume_np / save_volume dispatching on file extension (.mnc, .nii.gz)
+    io           -- load_volume_np / save_volume: MINC extensions through minc_io, every other file through nibabel
     minc_io      -- MINC2 I/O (minc2_simple), world-space resampling
-    nifti_io     -- NIfTI I/O (optional nibabel)
+    nifti_io     -- NIfTI, Analyze and other nibabel formats (optional nibabel)
     geo          -- affine decomposition / composition
 """
 __version__ = "0.1.0"

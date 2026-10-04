@@ -59,7 +59,8 @@ def segment(input, output, config, *, model_prefix=None, cpu=False, threads=0, d
     Run the pipeline described by config on one scan and write the result to a file.
 
     Args:
-        input:   path of the scan (.mnc, .nii, .nii.gz), or a list of input channels for multi-channel
+        input:   path of the scan (MINC: .mnc, .minc, also .gz; anything else through nibabel: .nii, .nii.gz,
+                 Analyze .img/.hdr, ...), or a list of input channels for multi-channel
                  models: paths, or numbers for constant-filled channels
         output:  path of the output volume, in the format given by its extension
         config:  dict with the config keys (`models` is required); not modified

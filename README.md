@@ -1,6 +1,6 @@
 # apply_seg_onnx
 
-ONNX Runtime inference of 3D MRI segmentation models on MINC (and NIfTI) volumes, without PyTorch.
+ONNX Runtime inference of 3D MRI segmentation models on MINC volumes, and on NIfTI, Analyze and other formats read by nibabel, without PyTorch.
 Moved out of `py_deep_seg` (`apply_multi_model_onnx.py` and the inference part of `seg_common/`, `minc/`, `nifti/`).
 
 Pipelines are selected by a JSON config file. They include:
@@ -20,7 +20,7 @@ Then choose the ONNX Runtime build with an extra. `onnxruntime` and `onnxruntime
 pip install '.[gpu]'          # onnxruntime-gpu >= 1.18 (CUDA)
 pip install '.[cpu]'          # onnxruntime >= 1.18 (CPU only)
 pip install .                 # ONNX Runtime already installed (e.g. conda-forge onnxruntime, also its CUDA builds)
-pip install '.[gpu,all]'      # + nibabel (.nii.gz I/O) and tqdm (--progress)
+pip install '.[gpu,all]'      # + nibabel (every format other than MINC) and tqdm (--progress)
 ```
 
 The extras `nifti` (nibabel) and `progress` (tqdm) can also be chosen separately. MINC input needs neither: all config keys, `reorient` included, work on `.mnc` without nibabel.
@@ -51,6 +51,15 @@ apply_seg_onnx --config cfg.json [--model_prefix DIR/] in.mnc out.mnc [--measure
 apply_seg_onnx --config cfg.json --li inputs.txt --lo outputs.txt --progress     # batch of scans
 apply_seg_onnx --help                                                            # all options
 ```
+
+File formats are chosen by the extension, for inputs and outputs alike:
+
+| extension | read and written through |
+|---|---|
+| `.mnc`, `.minc`, `.mnc.gz`, `.minc.gz` (any case) | `minc2_simple`; `.gz` outputs are gzipped after writing |
+| anything else: `.nii`, `.nii.gz`, Analyze `.img` / `.hdr`, `.mgz`, ... | nibabel (optional dependency), in the format nibabel assigns to the extension. An `.img` / `.hdr` output is written as a NIfTI-1 pair. |
+
+Input and output may differ in format; MINC header metadata is carried over only from MINC to MINC.
 
 GPU is used by default (`--cpu` to disable, `--device_id`, `--use_tf32`). `--measure` writes per-label volumes; label names come from the config key `labels_desc`.
 
@@ -216,9 +225,9 @@ At most one of the first three is applied, in this order of precedence; `normali
 | `onnx_tiled` | `TiledGroupNormSession`: drop-in for `InferenceSession.run()` that cuts the graph at every GroupNorm, runs the local stages tile by tile with a halo, and computes exact statistics from per-tile Σx, Σx² |
 | `volume` | Normalizations, crop/pad, reorientation, foreground bbox, voxel-grid resample/recover (`_resize`, on `scipy.ndimage.zoom`), window starts and Gaussian map (numpy/scipy; nibabel imported lazily, only for NIfTI reorientation) |
 | `postprocess` | `find_largest_component`, `measure_volumes`, `save_measurements` |
-| `io` | `load_volume_np` / `save_volume`, which dispatch on `.mnc` / `.nii.gz` |
+| `io` | `load_volume_np` / `save_volume`: MINC extensions (`is_minc`) through `minc_io`, every other file through `nifti_io` |
 | `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume`, `uniformize_volume_grid` |
-| `nifti_io` | NIfTI I/O through nibabel (optional; raises `ImportError` when it is missing) |
+| `nifti_io` | NIfTI, Analyze and other nibabel formats (optional; raises `ImportError` when nibabel is missing) |
 | `geo` | Affine `decompose` / `compose` |
 
 Rule: the package is numpy/ONNX only; nothing in it imports `torch` or handles torch tensors.
@@ -239,7 +248,7 @@ see `examples/DATA.md`): they build small synthetic ONNX models on the fly. One 
 |---|---|
 | `test_volume.py` | normalisation, crop/pad, bbox, reorient (NIfTI with nibabel; MINC without it, checked against nibabel), voxel-grid resample/recovery, window layout and Gaussian weights |
 | `test_resize.py` | `_resize` (scipy port of skimage resize) |
-| `test_io.py` | MINC/NIfTI round-trips and affines, metadata/history, missing nibabel, world-space resampling |
+| `test_io.py` | MINC/NIfTI round-trips and affines, format by extension (`.minc`, gzipped MINC, Analyze, `.nii`, `.mgz`), metadata/history, missing nibabel, world-space resampling |
 | `test_postprocess.py` | largest component, volume measurements, CSV |
 | `test_onnx_tiled.py` | `TiledGroupNormSession` against plain ORT (`gpu`: on CUDA) |
 | `test_inference.py` | sliding window (`legacy` layout against a copy of the original loop, `dense` default, `gaussian_map`), whole volume, geometry pre/post-processing, `resample` modes |
