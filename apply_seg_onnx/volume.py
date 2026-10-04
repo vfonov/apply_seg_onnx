@@ -187,7 +187,7 @@ def parse_bracket_input(spec):
 
 
 # ---------------------------------------------------------------------------
-# MindGlide/MONAI-compatible preprocessing (see /app/mindGlide/inference/mindglide/transforms.py)
+# Optional geometry preprocessing: reorientation, foreground crop, voxel-grid resampling
 # Arrays here are in voxel index order (i,j,k) matching the affine, i.e. the
 # reverse of the (k,j,i) order returned by load_volume_np.
 # ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ def _import_nibabel():
 
 def reorient_to(arr, aff, axcodes='RAS', minc=False):
     """
-    Reorient a voxel-ordered (i,j,k) array to the given axis codes, like MONAI Orientationd.
+    Reorient a voxel-ordered (i,j,k) array to the given axis codes.
 
     minc: the array comes from a MINC file read in standard order (positive steps, i,j,k = x,y,z),
           i.e. it is RAS: the transform follows from `axcodes` alone, without nibabel.
@@ -266,14 +266,14 @@ def _inverse_ornt(tr):
 
 
 def affine_spacing(aff):
-    """Voxel spacing as MONAI computes it (column norms of the affine)."""
+    """Voxel spacing: column norms of the affine."""
     aff = np.asarray(aff, dtype=np.float64)
     return np.sqrt(np.sum(aff[:3, :3] ** 2, axis=0))
 
 
 def foreground_bbox(arr):
     """
-    Bounding box of voxels > 0 (MONAI generate_spatial_bounding_box defaults).
+    Bounding box of voxels > 0.
 
     Returns:
         tuple: (start, end) lists, end exclusive. Whole volume if nothing is positive.
@@ -284,9 +284,10 @@ def foreground_bbox(arr):
     return [int(i.min()) for i in nz], [int(i.max()) + 1 for i in nz]
 
 
-def mindglide_resample_shape(spacing, shape, target_spacing=(1.0, 1.0, 1.0)):
+def grid_resample_shape(spacing, shape, target_spacing=(1.0, 1.0, 1.0)):
     """
-    MindGlide resampling decision and target shape (exact float comparison, truncation).
+    Voxel-grid resampling decision and target shape: no resampling when the spacing equals the target
+    exactly (float comparison); target shape truncated; anisotropic when the spacing ratio is >= 3.
 
     Returns:
         tuple: (resample_flag, new_shape, anisotropy_flag)
@@ -302,7 +303,7 @@ def mindglide_resample_shape(spacing, shape, target_spacing=(1.0, 1.0, 1.0)):
 
 def _resize(img, shape, order, mode='edge', cval=0.0):
     """
-    Resize `img` to `shape` (same number of dimensions) the way MindGlide resamples: spline interpolation
+    Resize `img` to `shape` (same number of dimensions) on the voxel grid: spline interpolation
     of `order` with grid_mode=True (voxel corners aligned), `mode` 'edge' (replicate) or 'constant' (cval),
     no anti-aliasing, output clipped to the input value range (widened to cval when cval is used).
     """
@@ -323,8 +324,9 @@ def _resize(img, shape, order, mode='edge', cval=0.0):
     return out
 
 
-def mindglide_resample_image(img, shape, anisotropy_flag):
-    """Port of mindglide.transforms.resample_image for a single 3D channel."""
+def grid_resample_image(img, shape, anisotropy_flag):
+    """Resample one 3D channel to `shape`: cubic spline; when anisotropic, cubic in-plane and nearest
+    along the last axis."""
     if anisotropy_flag:
         slices = [_resize(img[:, :, i], shape[:-1], order=3, mode='edge', cval=0) for i in range(img.shape[-1])]
         out = np.stack(slices, axis=-1)
@@ -332,9 +334,9 @@ def mindglide_resample_image(img, shape, anisotropy_flag):
     return _resize(img, shape, order=3, mode='edge', cval=0)
 
 
-def mindglide_recover_labels(labels, n_classes, shape, anisotropy_flag):
+def grid_recover_labels(labels, n_classes, shape, anisotropy_flag):
     """
-    Port of mindglide.transforms.recovery_prediction + argmax: bring a label map
+    Inverse of grid_resample_image for labels: bring a label map
     back to `shape` by resizing every class mask (1..n_classes-1) and thresholding at 0.5.
     Ties resolve to the lowest label; voxels claimed by no class become 0.
     """
@@ -359,10 +361,10 @@ def mindglide_recover_labels(labels, n_classes, shape, anisotropy_flag):
     return out
 
 
-def mindglide_recover_prob(prob, shape, anisotropy_flag):
+def grid_recover_prob(prob, shape, anisotropy_flag):
     """
     Bring a probability map (one channel) back to `shape` with the same interpolation
-    MindGlide uses for its class masks: linear, or nearest along the last axis then linear in-plane.
+    grid_recover_labels uses for the class masks: linear, or nearest along the last axis then linear in-plane.
     """
     if anisotropy_flag:
         h, w = prob.shape[:2]
@@ -373,7 +375,7 @@ def mindglide_recover_prob(prob, shape, anisotropy_flag):
 
 
 def nonzero_mean_std_normalize(arr):
-    """MONAI NormalizeIntensity(nonzero=True): z-score of voxels != 0, zeros untouched (float32)."""
+    """Z-score of the voxels != 0, zeros untouched (float32)."""
     arr = arr.astype(np.float32, copy=True)
     nz = arr != 0
     if not nz.any():
@@ -388,7 +390,7 @@ def nonzero_mean_std_normalize(arr):
 
 def window_starts(image_size, roi_size, interval):
     """
-    Window start positions per axis with MONAI's dense_patch_slices rule for a given step:
+    Window start positions per axis for a given step:
     the fewest windows (spaced by `interval`) that cover the axis, the last one clamped to the end.
     No duplicate windows. Requires image_size >= roi_size (pad first).
     """
@@ -410,14 +412,14 @@ def window_starts(image_size, roi_size, interval):
     return starts
 
 
-def monai_window_starts(image_size, roi_size, overlap):
-    """Window start positions per axis exactly as MONAI sliding_window_inference/dense_patch_slices."""
+def window_starts_overlap(image_size, roi_size, overlap):
+    """window_starts() with the step given as an overlap fraction of the window: int(roi * (1 - overlap))."""
     return window_starts(image_size, roi_size, [int(r * (1 - o)) for r, o in zip(roi_size, overlap)])
 
 
 def pad_to_size(arr, min_size, axes, value=0):
     """
-    Constant-pad `axes` of `arr` up to `min_size` (MONAI split: diff//2 before, rest after).
+    Constant-pad `axes` of `arr` up to `min_size` (diff//2 before, rest after).
     Returns (padded array, list of (before, after) per axis in `axes`).
     """
     pad = [(0, 0)] * arr.ndim
@@ -431,8 +433,9 @@ def pad_to_size(arr, min_size, axes, value=0):
     return arr, pads
 
 
-def monai_gaussian_importance(roi_size, sigma_scale=0.125):
-    """MONAI compute_importance_map(mode='gaussian')."""
+def separable_gaussian_weights(roi_size, sigma_scale=0.125):
+    """Gaussian window weights as a product of 1D float32 Gaussians (sigma = n * sigma_scale, centred),
+    not normalised, floored at max(min, 1e-3)."""
     m = None
     for i, n in enumerate(roi_size):
         x = np.arange(-(n - 1) / 2.0, (n - 1) / 2.0 + 1, dtype=np.float32)

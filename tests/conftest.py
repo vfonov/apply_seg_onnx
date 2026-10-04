@@ -47,7 +47,7 @@ def make_pointwise_model(path, out_name='seg'):
 
 
 def _groupnorm(nodes, inits, x, c, groups, name):
-    """GroupNorm in the torch.onnx.export form: Reshape -> InstanceNormalization -> Reshape(Shape) -> Mul -> Add"""
+    """GroupNorm in the form written by common exporters: Reshape -> InstanceNormalization -> Reshape(Shape) -> Mul -> Add"""
     rng = np.random.default_rng(len(inits))
     inits += [numpy_helper.from_array(np.array([0, groups, -1], np.int64), f'{name}_shape'),
               numpy_helper.from_array(np.ones(groups, np.float32), f'{name}_s'),

@@ -4,10 +4,10 @@ ONNX Runtime inference of 3D MRI segmentation models on MINC (and NIfTI) volumes
 Moved out of `py_deep_seg` (`apply_multi_model_onnx.py` and the inference part of `seg_common/`, `minc/`, `nifti/`).
 
 Pipelines are selected by a JSON config file. They include:
-- whole-volume or MONAI-style sliding-window inference;
+- whole-volume or sliding-window inference;
 - majority voting or averaging over several models;
 - flip test-time augmentation;
-- MindGlide-compatible preprocessing and postprocessing, which reproduces `mindglide` voxel for voxel in fp32;
+- optional geometry preprocessing (reorientation, foreground crop, voxel-grid resampling) undone on the output;
 - exact whole-volume inference of GroupNorm networks, such as WMH-SynthSeg, with GPU memory bounded by a tile size (`TiledGroupNormSession`).
 
 ## Installation
@@ -54,50 +54,132 @@ apply_seg_onnx --help                                                           
 
 GPU is used by default (`--cpu` to disable, `--device_id`, `--use_tf32`). `--measure` writes per-label volumes; label names come from the config key `labels_desc`.
 
-### Example configs (in the MindGlide/WMH-SynthSeg replication workspace)
+### Example configs (in the replication workspace)
 
 | config | pipeline |
 |---|---|
-| `mindglide_config_conjurer_patch_mk2.json` | The steps below run in this order:<br>1. reorient to RAS<br>2. crop to the nonzero bounding box<br>3. MindGlide resample to 1 mm<br>4. nonzero z-score<br>5. sliding window 128×128×64 with 50% overlap and Gaussian weights<br>6. recover the labels<br>7. keep the largest component |
+| `mindglide_config_conjurer_patch_mk2.json` | The steps below run in this order:<br>1. reorient to RAS<br>2. crop to the nonzero bounding box<br>3. `resample: "mindglide"` to 1 mm<br>4. nonzero z-score<br>5. sliding window 128×128×64 with 50% overlap and Gaussian weights (`gaussian_map: "separable"`)<br>6. recover the labels<br>7. keep the largest component |
 | `synthseg_wmh_tiled_tta.json` | WMH-SynthSeg as in `minc_wmh_synthseg.py --trim`:<br>• native grid<br>• x/max normalization<br>• whole volume with exact GroupNorm statistics, run in 128³ tiles (`tiled_groupnorm`)<br>• flip-X TTA<br>• FreeSurfer label values (`label_values`) |
 
-### Config keys added for these pipelines
+## Config file reference
 
-All of these keys are off by default.
+The config is one JSON object. Every key is optional except `models`; the default applies when a key is absent.
+With `--config`, the pipeline flags of the command line are ignored (only `--model` overrides `models`).
+Without `--config`, the settings are built from the flags; keys marked "config only" have no flag.
+Differences from the original `apply_multi_model_onnx.py` are listed in `CHANGES_FROM_ORIGINAL.md`.
 
-| key | effect |
-|---|---|
-| `reorient` | Reorient to these axis codes, e.g. `"RAS"`, like MONAI `Orientationd`, and reorient back afterwards. For NIfTI, the orientation comes from the affine through nibabel. MINC is read in standard order (positive steps, i,j,k = x,y,z = RAS), so the flips and permutation follow from the axis codes alone, without nibabel. For `"RAS"` this is the identity. |
-| `crop_foreground` | Crop to the bounding box of voxels > 0, then un-crop the result. |
-| `resample: "mindglide"` | Resample on the voxel grid the way MindGlide does (`scipy.ndimage.zoom`, bit-identical to MindGlide). |
-| `spacing_float32` | Round the affine to float32 before MindGlide's exact spacing test. |
-| `normalize_mean_std_nonzero` | Z-score of the nonzero voxels only (MONAI `NormalizeIntensity(nonzero=True)`). |
-| `largest`, `largest_connectivity` | Keep the largest connected component. Connectivity 1 means 6-connectivity. |
-| `sigma_scale`, `sw_batch_size` | Gaussian window weights; windows per ONNX call. |
-| `tiled_groupnorm` | Tile size for `TiledGroupNormSession`, used with `whole`. 128 needs about 9.5 GB of GPU memory, 96 about 8 GB, 64 about 4.5 GB. |
-| `trim_center` | With `whole` + `trim`, also centre the trimmed box along Z. |
-| `label_values` | Map class index to the saved label value. A list `labels_desc` then refers to `label_values[1:]`. The output uses the smallest type that holds the values (uint8/uint16/uint32, int8/16/32 if negative). |
+### Model
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `models` | – | `--model` | ONNX file, or list of files. `--model_prefix` is prepended to each name as a string. Several models: outputs are averaged, or voted on with `majority`. The model input must be named `scan`. |
+| `n_classes` | 2 | `-n` | Number of output classes. Sets the channel count in patch mode and the length of the `flip_x` map. |
+| `use_classes` | none | `-u` | Keep only the first N output channels (for models with extra channels). |
+| `bck` | 0 | `--bck` | Background class: used where nothing is predicted and outside `mask`. |
+| `continuous` | false | `--continuous` | Regression model: output `scan_out` is saved as float32, no argmax. |
+| `dist` | false | `--distance` | Distance model: output `dist`; label = argmin (one channel: `< 1.0`). Otherwise the output is `seg` and the label is the argmax. |
+| `channel_last` | false | `--channel_last` | Model takes and returns `(N, X, Y, Z, C)`. |
+| `majority` | false | `--majority` | With several models: per-voxel majority vote of the labels instead of the argmax of the mean. Not applied together with `augment_tta`. |
+| `tiled_groupnorm` | none | config only | Tile size (voxels) for `TiledGroupNormSession`, used with `whole`: whole-volume result of GroupNorm networks with bounded GPU memory. 128 needs about 9.5 GB, 96 about 8 GB, 64 about 4.5 GB. |
+
+### Input geometry
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `reference` | none | `-R` | Volume file: the input is resampled onto its grid (linear) before the model. `--model_prefix` is prepended. |
+| `uniformize` | none | `-U` | Voxel size in mm: the input is resampled to isotropic voxels (linear) before the model. |
+| `save_uniformized` | false | `-S` | Save the output on the `reference` / `uniformize` grid. Otherwise labels are resampled back to the input grid (nearest neighbour). |
+| `resample` | `"legacy"` | config only | `"legacy"`: the only resampling is `uniformize` / `reference`. `"mindglide"`: resample to 1 mm on the voxel grid before the model (cubic spline through `scipy.ndimage.zoom`, truncated target shape; nearest along the slice axis when the spacing ratio is ≥ 3) and bring the labels back class by class. Any other value is an error. |
+| `spacing_float32` | false | config only | With `resample: "mindglide"`: round the affine to float32 before the exact spacing = 1 test, so MINC and NIfTI inputs decide alike. |
+| `reorient` | none | config only | Axis codes, e.g. `"RAS"`: reorient before the model and back afterwards. NIfTI: orientation from the affine, through nibabel. MINC is read in standard order (RAS), so no nibabel is needed and `"RAS"` is the identity. |
+| `crop_foreground` | false | config only | Crop to the bounding box of voxels > 0; the result is put back, background outside. |
+| `cropvol` | 0 | `--cropvol` | Remove N voxels at every border before the model; the result is put back with label 0 outside. |
+| `padvol`, `padfill` | 0, 0.0 | `--padvol`, `--padfill` | Pad N voxels at every border with `padfill` before the model, removed afterwards. Ignored when `cropvol` > 0. |
+| `nibabel` | false | `--nibabel` | Feed the model with axes in (x, y, z) order instead of the loaded (z, y, x) order. |
+| `freesurfer` | false | `--freesurfer` | As `nibabel`, with the y axis flipped. Takes precedence over `nibabel`. |
+
+### Intensity normalization
+
+At most one of the first three is applied, in this order of precedence.
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `normalize` | false | `--normalize` | Subtract the minimum, divide by the 99th percentile, clip to [0, 1]. |
+| `normalize_max` | false | `--max_normalize` | Divide by the maximum, clip to [0, 1]. |
+| `normalize_mean_std` | false | `--mean_std_normalize` | Subtract the mean and divide by the standard deviation of the voxels > 0 (all voxels are transformed). |
+| `normalize_mean_std_nonzero` | false | config only | Z-score of the voxels ≠ 0 only; zeros stay zero. Applied per channel, before the three above. |
+
+### Whole-volume mode
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `whole` | false | `--whole` | Run the model once on the whole volume instead of patches. |
+| `quant_size` | 64 | `--quant` | The volume size is made a multiple of this. |
+| `trim` | false | `--trim` | false: zero-pad at the end of each axis and cut the result back. true: cut a box out instead; outside it the result is class 0. The box is centred along the first two array axes and starts at 0 along the last one. |
+| `trim_center` | false | config only | With `trim`: centre the box along the last array axis too. |
+
+### Sliding-window mode (when `whole` is false)
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `patch_sz` | 64 | `--patch_sz` | Patch size: one number or three. Axes shorter than the patch are zero-padded and cut back. |
+| `stride` | 32 | `--stride` | Step between windows: one number or three. The flag defaults to `patch_sz − 2·crop`. |
+| `crop` | 0 | `--crop` | Discard N voxels at every edge of each predicted patch. The outer N voxels of the volume are then never predicted and become background. |
+| `window_layout` | `"dense"` | config only | `"dense"`: fewest windows spaced by `stride`, the last one clamped to the end, no duplicates. `"legacy"`: layout of the original script, `ceil(size/stride)` windows per axis with those past the end clamped onto the last position, which is then counted more than once. The two coincide when no window is clamped twice. |
+| `use_gaussian_weights` | false | `--use_gaussian_weights` | Weight each patch by a Gaussian centred on it when overlapping patches are averaged. |
+| `sigma_scale` | 0.25 | config only | Gaussian sigma as a fraction of the used patch size. |
+| `gaussian_map` | `"normalized"` | config only | `"normalized"`: the original map, maximum 1, floored at 0.001. `"separable"`: product of 1D float32 Gaussians, not normalised (maximum below 1 for even sizes), floored at 0.001. Same Gaussian up to scale; they differ in float rounding and in where the floor applies. |
+| `sw_batch_size` | 1 | config only | Windows per ONNX call. Does not change the result. |
+
+### Test-time augmentation
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `augment_tta` | none | config only | `{"flip_x": [...]}`: also run the scan flipped along x and average the two softmax outputs. The list is a permutation of the `n_classes` class indices that maps each class to its mirror (left ↔ right). For `continuous` models the two outputs are averaged and the list is not used. Only `flip_x` is supported. |
+
+### Output
+
+| key | default | flag | meaning |
+|---|---|---|---|
+| `largest` | false | `--largest` | Keep only the largest connected component of the non-background voxels. |
+| `largest_connectivity` | 3 | config only | Neighbourhood for `largest`: 3 = 26 neighbours, 1 = 6 neighbours. |
+| `mask` | none | `--mask` | Volume file: voxels where it is < 1 are set to `bck`. Resampled (nearest neighbour) when its grid differs from the output. |
+| `label_values` | none | config only | List: class index → label value written to the file. The output uses the smallest integer type that holds the values. |
+| `labels_desc` | none | config only | Label names for `--measure`: a list (item *i* names class *i*+1, or `label_values[i+1]` when that key is set), an object `{"value": "name"}`, or the name of a JSON file holding such an object. Without it `--measure` writes nothing. |
+| `fuzzy` | none | `-F` | Prefix for per-class probability maps: `<prefix>_<class>.<ext>`, or `<prefix>_<scan>_<class>.<ext>` for several scans, in the format of the output. |
+| `history` | command line | – | History string stored in the output; set by the command line. |
+
+### Order of the steps
+
+1. Load the scan (all channels on the same grid).
+2. `reorient` → `crop_foreground` → `resample: "mindglide"` → `normalize_mean_std_nonzero`.
+3. `reference` / `uniformize` resampling.
+4. Flip copy for `augment_tta`; `cropvol` or `padvol`.
+5. Model: `whole` (pad or `trim`) or sliding window; axis convention and `normalize*` are applied here.
+6. Average or vote over models; average the flipped pass; argmax.
+7. Undo `cropvol` / `padvol`, then step 2, then step 3 (unless `save_uniformized`).
+8. `largest` → `fuzzy` maps → `mask` → `label_values` → save → `--measure`.
 
 ## Modules
 
 | module | content |
 |---|---|
-| `inference` | Command line (`main`), `make_onnx_sessions`, `segment_whole`, `segment_with_patches_overlap` (MONAI window layout), `segment_with_onnx[_batched]`, MindGlide pre/post-processing |
+| `inference` | Command line (`main`), `make_onnx_sessions`, `segment_whole`, `segment_with_patches_overlap`, `segment_with_onnx[_batched]`, geometry pre/post-processing (`preprocess_volume`, `postprocess_labels`, `postprocess_fuzzy`) |
 | `onnx_tiled` | `TiledGroupNormSession`: drop-in for `InferenceSession.run()` that cuts the graph at every GroupNorm, runs the local stages tile by tile with a halo, and computes exact statistics from per-tile Σx, Σx² |
-| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, MindGlide resample/recover (`_resize`, on `scipy.ndimage.zoom`), MONAI window starts and Gaussian map (numpy/scipy; nibabel imported lazily, only for NIfTI reorientation) |
+| `volume` | Normalizations, crop/pad, reorientation, foreground bbox, voxel-grid resample/recover (`_resize`, on `scipy.ndimage.zoom`), window starts and Gaussian map (numpy/scipy; nibabel imported lazily, only for NIfTI reorientation) |
 | `postprocess` | `find_largest_component`, `measure_volumes`, `save_measurements` |
 | `io` | `load_volume_np` / `save_volume`, which dispatch on `.mnc` / `.nii.gz` |
 | `minc_io` | MINC2 I/O through `minc2_simple`, `resample_volume`, `uniformize_volume` |
 | `nifti_io` | NIfTI I/O through nibabel (optional; raises `ImportError` when it is missing) |
 | `geo` | Affine `decompose` / `compose` |
 
-Rule: nothing in this package imports `torch`.
+Rule: the package is numpy/ONNX only; nothing in it imports `torch` or handles torch tensors.
 
 ## Tests
 
 ```bash
 python -m pytest            # from the repository root; needs pytest
-python -m pytest -m "not gpu and not reference"   # skip the CUDA and MONAI cross-checks
+python -m pytest -m "not gpu"   # skip the CUDA tests
 ```
 
 The tests need no data files or PyTorch: they build small synthetic ONNX models on the fly. One is a pointwise
@@ -105,17 +187,16 @@ The tests need no data files or PyTorch: they build small synthetic ONNX models 
 
 | file | covers |
 |---|---|
-| `test_volume.py` | normalisation, crop/pad, bbox, reorient (NIfTI with nibabel; MINC without it, checked against nibabel), MindGlide resample/recovery, window layout and Gaussian weights (`reference`: against MONAI) |
+| `test_volume.py` | normalisation, crop/pad, bbox, reorient (NIfTI with nibabel; MINC without it, checked against nibabel), voxel-grid resample/recovery, window layout and Gaussian weights |
 | `test_resize.py` | `_resize` (scipy port of skimage resize) |
 | `test_io.py` | MINC/NIfTI round-trips and affines, metadata/history, missing nibabel, world-space resampling |
 | `test_postprocess.py` | largest component, volume measurements, CSV |
 | `test_onnx_tiled.py` | `TiledGroupNormSession` against plain ORT (`gpu`: on CUDA) |
-| `test_inference.py` | sliding window, whole volume, MindGlide pre/post-processing |
-| `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, MindGlide pipeline on MINC without nibabel, CLI |
-| `test_package.py` | the package never imports torch |
+| `test_inference.py` | sliding window (`legacy` layout against a copy of the original loop, `dense` default, `gaussian_map`), whole volume, geometry pre/post-processing, `resample` modes |
+| `test_pipeline.py` | `segment_with_onnx[_batched]` on files: minibatches, measure, recover, fuzzy, label_values, flip TTA, majority, tiled config, geometry pipeline on MINC without nibabel, missing input, CLI |
+| `test_package.py` | the package never imports torch; the MINC writer takes numpy arrays only |
 
 Markers:
 - `gpu` tests are skipped without `CUDAExecutionProvider`.
-- `reference` tests are skipped without monai.
 
 One test is a strict `xfail` documenting a known issue: the precision of tiled GroupNorm depends on the tile size.

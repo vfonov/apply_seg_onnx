@@ -56,14 +56,14 @@ test:
   commands:
     - pip check
     - apply_seg_onnx --help
-    # against the installed package; GPU tests need a GPU, MONAI cross-checks are skipped without monai
+    # against the installed package; GPU tests need a GPU
     - python -m pytest -q -m "not gpu" tests
 
 about:
   summary: 'ONNX Runtime inference of 3D MRI segmentation models (MINC/NIfTI) without PyTorch'
   description: |
     Sliding-window and whole-volume ONNX Runtime inference for 3D brain MRI segmentation
-    (MindGlide, WMH-SynthSeg, ...), with MindGlide-compatible pre/post-processing,
+    with optional reorientation / foreground crop / voxel-grid resampling,
     exact tiled GroupNorm inference, MINC I/O through minc2-simple and optional NIfTI I/O (nibabel).
 
 extra:

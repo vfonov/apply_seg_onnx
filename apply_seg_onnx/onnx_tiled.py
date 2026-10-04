@@ -11,7 +11,7 @@ GroupNorms) is run tile by tile on the GPU with a halo covering its receptive fi
 as whole-volume arrays in host memory. Each stage also returns per-channel sums of x and x^2 over the tile cores,
 which give the exact GroupNorm statistics used (as a per-channel scale/shift) by the following stages.
 
-GroupNorm is recognised in the form produced by torch.onnx.export:
+GroupNorm is recognised in the form written by common exporters:
     Reshape(x, [N, G, -1]) -> InstanceNormalization -> Reshape(., Shape(x)) [-> Mul gamma -> Add beta]
 """
 
@@ -83,7 +83,7 @@ class TiledGroupNormSession:
            matches the whole-volume computation), run on the device, and only its core is written back;
          - stored tensors are freed after the last stage that reads them.
       The result equals whole-volume inference up to floating point summation order (WMH-SynthSeg: logits
-      within ~1e-4..1e-2 of ORT/torch whole-volume, ~1e-6 of the voxels change label).
+      within ~1e-4..1e-2 of plain whole-volume inference, ~1e-6 of the voxels change label).
 
     Memory: GPU memory is bounded by the largest stage on one tile (WMH-SynthSeg, tile 128: ~9.5 GB;
     96: ~8 GB; 64: ~4.5 GB). Host memory holds the whole-volume tensors that are still needed (~25 GB for a

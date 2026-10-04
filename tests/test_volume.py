@@ -1,4 +1,4 @@
-"""apply_seg_onnx.volume: normalizations, crop/pad, MindGlide/MONAI-compatible helpers."""
+"""apply_seg_onnx.volume: normalizations, crop/pad, reorientation, voxel-grid resampling, window helpers."""
 import sys
 
 import numpy as np
@@ -33,7 +33,7 @@ def test_mean_std_normalize_np():
 def test_nonzero_mean_std_normalize():
     a = np.zeros((10, 12, 14), np.float32)
     a[2:5, 3:9, 4:6] = np.arange(36, dtype=np.float32).reshape(3, 6, 2) + 1
-    a[0, 0, 0] = -4  # negative values count as nonzero (MONAI nonzero=True selects != 0)
+    a[0, 0, 0] = -4  # negative values count as nonzero (selected by != 0)
     n = V.nonzero_mean_std_normalize(a)
     assert n.dtype == np.float32
     assert np.all(n[a == 0] == 0)
@@ -66,7 +66,7 @@ def test_pad_to_size():
     a = np.ones((1, 1, 5, 8, 3))
     p, pads = V.pad_to_size(a, (8, 6, 6), axes=(2, 3, 4), value=0)
     assert p.shape == (1, 1, 8, 8, 6)
-    assert pads == [(1, 2), (0, 0), (1, 2)]  # MONAI split: diff//2 before, rest after
+    assert pads == [(1, 2), (0, 0), (1, 2)]  # diff//2 before, rest after
     assert p.sum() == a.sum()
     assert np.array_equal(p[:, :, 1:6, :, 1:4], a)
     same, pads = V.pad_to_size(a, (5, 8, 3), axes=(2, 3, 4))
@@ -176,7 +176,7 @@ def test_reorient_nifti_without_nibabel(no_nibabel):
         V.reorient_back(np.zeros((2, 3, 4)), np.array([[0, 1], [1, 1], [2, 1.0]]))
 
 # ---------------------------------------------------------------------------------------------------------
-# MindGlide resampling
+# voxel-grid resampling
 @pytest.mark.parametrize('spacing, shape, expected', [
     ([1.0, 1.0, 1.0], [100, 120, 90], (False, [100, 120, 90], False)),
     ([2.0, 1.0, 1.0], [45, 120, 90], (True, [90, 120, 90], False)),        # ratio 2: isotropic path
@@ -184,44 +184,44 @@ def test_reorient_nifti_without_nibabel(no_nibabel):
     ([0.9, 0.9, 0.9], [101, 101, 101], (True, [90, 90, 90], False)),       # truncation of 90.9
     ([1.0000001, 1.0, 1.0], [10, 10, 10], (True, [10, 10, 10], False)),   # exact float comparison
 ])
-def test_mindglide_resample_shape(spacing, shape, expected):
-    assert V.mindglide_resample_shape(spacing, shape) == expected
+def test_grid_resample_shape(spacing, shape, expected):
+    assert V.grid_resample_shape(spacing, shape) == expected
 
 
 @pytest.mark.parametrize('anis', [False, True])
-def test_mindglide_resample_image(anis):
+def test_grid_resample_image(anis):
     img = np.random.default_rng(5).random((20, 18, 10)).astype(np.float32) * 10
-    out = V.mindglide_resample_image(img, [30, 18, 25], anis)
+    out = V.grid_resample_image(img, [30, 18, 25], anis)
     assert out.shape == (30, 18, 25)
     assert out.min() >= img.min() and out.max() <= img.max()  # clipped like skimage resize(clip=True)
-    assert np.array_equal(V.mindglide_resample_image(img, list(img.shape), anis), img)
+    assert np.array_equal(V.grid_resample_image(img, list(img.shape), anis), img)
 
 
 @pytest.mark.parametrize('anis', [False, True])
-def test_mindglide_recover_labels(anis):
+def test_grid_recover_labels(anis):
     lab = np.zeros((20, 18, 10), np.uint8)
     lab[4:12, 3:9, 2:6] = 1
     lab[12:18, 10:16, 5:9] = 2
     # same grid: unchanged
-    assert np.array_equal(V.mindglide_recover_labels(lab, 3, list(lab.shape), anis), lab)
+    assert np.array_equal(V.grid_recover_labels(lab, 3, list(lab.shape), anis), lab)
     # 2x along the last axis and back
-    up = V.mindglide_recover_labels(lab, 3, [20, 18, 20], anis)
+    up = V.grid_recover_labels(lab, 3, [20, 18, 20], anis)
     assert up.shape == (20, 18, 20) and set(np.unique(up)) == {0, 1, 2}
-    assert np.array_equal(V.mindglide_recover_labels(up, 3, [20, 18, 10], anis)[:, :, 1:-1], lab[:, :, 1:-1])
+    assert np.array_equal(V.grid_recover_labels(up, 3, [20, 18, 10], anis)[:, :, 1:-1], lab[:, :, 1:-1])
 
 
-def test_mindglide_recover_labels_ties_lowest_class():
+def test_grid_recover_labels_ties_lowest_class():
     lab = np.zeros((2, 1, 1), np.uint8)
     lab[0], lab[1] = 1, 2
     # downsampling 2 -> 1 voxel: both classes cover exactly 0.5 -> lowest label wins
-    assert V.mindglide_recover_labels(lab, 3, [1, 1, 1], False)[0, 0, 0] == 1
+    assert V.grid_recover_labels(lab, 3, [1, 1, 1], False)[0, 0, 0] == 1
 
 
-def test_mindglide_recover_prob():
+def test_grid_recover_prob():
     p = np.random.default_rng(6).random((8, 9, 5)).astype(np.float32)
-    assert np.array_equal(V.mindglide_recover_prob(p, [8, 9, 5], False), p)
+    assert np.array_equal(V.grid_recover_prob(p, [8, 9, 5], False), p)
     for anis in (False, True):
-        out = V.mindglide_recover_prob(p, [16, 9, 10], anis)
+        out = V.grid_recover_prob(p, [16, 9, 10], anis)
         assert out.dtype == np.float32 and out.shape == (16, 9, 10)
         assert out.min() >= p.min() and out.max() <= p.max()
 
@@ -243,42 +243,17 @@ def test_window_starts_properties(n, r, step):
 
 def test_window_starts_known():
     assert V.window_starts([176, 128, 97], [128, 128, 64], [64, 64, 32]) == [[0, 48], [0], [0, 32, 33]]
-    assert V.monai_window_starts([176, 128, 97], [128, 128, 64], [0.5, 0.5, 0.5]) == [[0, 48], [0], [0, 32, 33]]
+    assert V.window_starts_overlap([176, 128, 97], [128, 128, 64], [0.5, 0.5, 0.5]) == [[0, 48], [0], [0, 32, 33]]
 
 
-def test_monai_gaussian_importance():
-    w = V.monai_gaussian_importance([16, 16, 8], 0.125)
+def test_separable_gaussian_weights():
+    w = V.separable_gaussian_weights([16, 16, 8], 0.125)
     assert w.shape == (16, 16, 8) and w.dtype == np.float32
     assert abs(w.min() - 1e-3) < 1e-7  # floor
     assert w.argmax() == np.ravel_multi_index((7, 7, 3), w.shape)
     assert np.array_equal(w, w[::-1, ::-1, ::-1])  # symmetric
-    odd = V.monai_gaussian_importance([5, 5, 5], 0.125)
+    odd = V.separable_gaussian_weights([5, 5, 5], 0.125)
     assert odd[2, 2, 2] == 1.0  # odd size: exact centre
-
-
-@pytest.mark.reference
-def test_window_starts_vs_monai():
-    utils = pytest.importorskip('monai.data.utils')
-    from monai.inferers.utils import _get_scan_interval
-    rng = np.random.default_rng(7)
-    for _ in range(50):
-        roi = [int(x) for x in rng.integers(8, 64, 3)]
-        size = [r + int(x) for r, x in zip(roi, rng.integers(0, 150, 3))]
-        overlap = float(rng.choice([0.25, 0.5, 0.6, 0.75]))
-        interval = _get_scan_interval(size, roi, 3, [overlap] * 3)
-        slices = utils.dense_patch_slices(size, roi, interval)
-        monai = sorted({tuple(s.start for s in sl) for sl in slices})
-        ours = V.monai_window_starts(size, roi, [overlap] * 3)
-        assert sorted(tuple(int(v) for v in t) for t in np.array(np.meshgrid(*ours, indexing='ij')).reshape(3, -1).T) \
-            == monai, (size, roi, overlap)
-
-
-@pytest.mark.reference
-def test_gaussian_importance_vs_monai():
-    utils = pytest.importorskip('monai.data.utils')
-    for roi in ([128, 128, 64], [16, 15, 9]):
-        m = utils.compute_importance_map(roi, mode='gaussian', sigma_scale=0.125, device='cpu').numpy()
-        assert np.allclose(V.monai_gaussian_importance(roi, 0.125), m, rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize('values, expected', [

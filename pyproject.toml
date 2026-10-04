@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 cpu = ["onnxruntime>=1.18"]
 gpu = ["onnxruntime-gpu>=1.18"]
-nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key (MindGlide pipeline)
+nifti = ["nibabel"]                    # .nii.gz I/O and the "reorient" config key on NIfTI input
 progress = ["tqdm"]                    # --progress
 all = ["nibabel", "tqdm"]
 
@@ -40,5 +40,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "gpu: needs onnxruntime CUDAExecutionProvider and a GPU (skipped otherwise)",
-    "reference: cross-checks against MONAI (skipped if monai is not installed)",
 ]

@@ -18,7 +18,7 @@ def find_largest_component(input, connectivity=3):
     Args:
         input: Binary or labeled numpy array
         connectivity: neighbourhood for scipy generate_binary_structure:
-                      1 = 6-connectivity (scipy/MindGlide default), 3 = 26-connectivity (previous behaviour)
+                      1 = 6-connectivity (scipy default), 3 = 26-connectivity (original behaviour)
 
     Returns:
         Boolean mask of the largest component

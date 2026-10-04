@@ -160,11 +160,11 @@ def test_tiled_groupnorm_matches_plain_whole(tmp_path, scan, gn_unet_model):
 
 
 @needs_nibabel
-def test_mindglide_pipeline_restores_geometry(tmp_path, scan, pointwise_model):
+def test_geometry_pipeline_restores_geometry(tmp_path, scan, pointwise_model):
     aff = np.array([[-1.0, 0, 0, 90], [0, 1.0, 0, -120], [0, 0, -2.0, 70], [0, 0, 0, 1]])  # RPI, 2 mm slices
     fn, d, _ = scan('in.nii.gz', shape=(12, 24, 28), aff=aff)
     out = str(tmp_path / 'seg.nii.gz')
-    s = settings_for(pointwise_model, reorient='RAS', crop_foreground=True, resample='mindglide', largest=True,
+    s = settings_for(pointwise_model, reorient='RAS', crop_foreground=True, resample='mindglide', largest=True, gaussian_map='separable',
                      use_gaussian_weights=True, sigma_scale=0.125)
     I.segment_with_onnx([fn], out, s)
     seg, seg_aff = load_labels(out)
@@ -174,10 +174,10 @@ def test_mindglide_pipeline_restores_geometry(tmp_path, scan, pointwise_model):
 
 
 @pytest.mark.parametrize('axcodes', ['RAS', 'LPI'])
-def test_mindglide_pipeline_minc_without_nibabel(tmp_path, scan, pointwise_model, monkeypatch, axcodes):
+def test_geometry_pipeline_minc_without_nibabel(tmp_path, scan, pointwise_model, monkeypatch, axcodes):
     """`reorient` on a MINC input needs no nibabel and gives the same result as with nibabel"""
     fn, d, aff = scan('in.mnc', shape=(12, 24, 28), aff=np.diag([1.0, 1.0, 2.0, 1.0]))
-    s = settings_for(pointwise_model, reorient=axcodes, crop_foreground=True, resample='mindglide', largest=True,
+    s = settings_for(pointwise_model, reorient=axcodes, crop_foreground=True, resample='mindglide', largest=True, gaussian_map='separable',
                      use_gaussian_weights=True, sigma_scale=0.125)
     out = str(tmp_path / 'seg.mnc')
     if have_nibabel:
@@ -229,3 +229,21 @@ def test_cli_config_lists_and_measure(tmp_path, scan, pointwise_model, write_con
         assert np.array_equal(load_labels(o)[0], pointwise_labels(d))
     with open(tmp_path / 'vol.csv') as f:
         assert len(list(csv.DictReader(f))) == 2
+
+
+def test_single_scan_missing_input_raises(tmp_path, pointwise_model):
+    out = str(tmp_path / 'seg.mnc')
+    with pytest.raises(FileNotFoundError):
+        I.segment_with_onnx([str(tmp_path / 'missing.mnc')], out, settings_for(pointwise_model))
+    # batch mode skips it
+    I.segment_with_onnx_batched([str(tmp_path / 'missing.mnc')], [out], settings_for(pointwise_model))
+
+
+def test_resample_legacy_is_the_default(tmp_path, scan, pointwise_model):
+    fn, _, _ = scan()
+    a, b = str(tmp_path / 'a.mnc'), str(tmp_path / 'b.mnc')
+    I.segment_with_onnx([fn], a, settings_for(pointwise_model))
+    I.segment_with_onnx([fn], b, settings_for(pointwise_model, resample='legacy', window_layout='dense', gaussian_map='normalized'))
+    assert np.array_equal(load_labels(a)[0], load_labels(b)[0])
+    with pytest.raises(ValueError):
+        I.segment_with_onnx([fn], a, settings_for(pointwise_model, resample='other'))

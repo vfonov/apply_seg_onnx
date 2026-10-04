@@ -113,25 +113,24 @@ def save_minc_volume(fn, data, aff, ref_fname=None, history=None):
     bool -> uint8, float16 -> float32, 64-bit integers -> smallest integer type that holds the values
     (float64 stored as double, with a warning, if 32 bits are not enough).
     """
+    if not isinstance(data, np.ndarray):
+        raise TypeError(f"save_minc_volume needs a numpy array, got {type(data).__name__}")
     dims=affine_to_dims(aff, data.shape)
     out=minc2_file()
-    if isinstance(data, np.ndarray):
-        store_type = None
-        if data.dtype == np.bool_:
-            data = data.astype(np.uint8)
-        elif data.dtype == np.float16:
-            data = data.astype(np.float32)
-        elif data.dtype in (np.int64, np.uint64):
-            dt = smallest_int_dtype(data)
-            if dt == np.float64:
-                store_type = minc2_file.MINC2_DOUBLE  # keep large integer values exact
-            data = data.astype(dt)
-        if data.dtype not in _MINC_TYPES:
-            raise ValueError(f"unsupported dtype {data.dtype} for MINC")
-        default_store, representation = _MINC_TYPES[data.dtype]
-        out.define(dims, store_type or default_store, representation)
-    else:
-        out.define(dims, minc2_file.MINC2_SHORT, minc2_file.MINC2_FLOAT)
+    store_type = None
+    if data.dtype == np.bool_:
+        data = data.astype(np.uint8)
+    elif data.dtype == np.float16:
+        data = data.astype(np.float32)
+    elif data.dtype in (np.int64, np.uint64):
+        dt = smallest_int_dtype(data)
+        if dt == np.float64:
+            store_type = minc2_file.MINC2_DOUBLE  # keep large integer values exact
+        data = data.astype(dt)
+    if data.dtype not in _MINC_TYPES:
+        raise ValueError(f"unsupported dtype {data.dtype} for MINC")
+    default_store, representation = _MINC_TYPES[data.dtype]
+    out.define(dims, store_type or default_store, representation)
 
     out.create(fn)
     
@@ -150,10 +149,7 @@ def save_minc_volume(fn, data, aff, ref_fname=None, history=None):
         out.write_attribute("","history",new_history)
 
     out.setup_standard_order()
-    if isinstance(data, np.ndarray):
-        out.save_complete_volume(np.ascontiguousarray(data))
-    else:
-        out.save_complete_volume_tensor(data)
+    out.save_complete_volume(np.ascontiguousarray(data))
     out.close()
 
 

@@ -1,4 +1,4 @@
-"""apply_seg_onnx.volume._resize: MindGlide-style resampling on scipy.ndimage.zoom (grid_mode)."""
+"""apply_seg_onnx.volume._resize: voxel-grid resampling on scipy.ndimage.zoom (grid_mode)."""
 import numpy as np
 import pytest
 

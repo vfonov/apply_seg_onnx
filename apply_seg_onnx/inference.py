@@ -9,6 +9,7 @@
 import argparse
 import re
 import sys
+import math
 import json
 import os
 import traceback
@@ -20,9 +21,9 @@ from .volume import (smallest_int_dtype, autonorm_np, maxnorm_np, mean_std_norma
                      apply_cropvol, apply_padvol, undo_cropvol, undo_padvol,
                      parse_bracket_input,
                      reorient_to, reorient_back, affine_spacing, foreground_bbox,
-                     mindglide_resample_shape, mindglide_resample_image,
-                     mindglide_recover_labels, mindglide_recover_prob, nonzero_mean_std_normalize,
-                     monai_gaussian_importance,
+                     grid_resample_shape, grid_resample_image,
+                     grid_recover_labels, grid_recover_prob, nonzero_mean_std_normalize,
+                     separable_gaussian_weights,
                      window_starts, pad_to_size)
 from .postprocess import find_largest_component, measure_volumes, save_measurements
 from .onnx_tiled import TiledGroupNormSession
@@ -315,7 +316,7 @@ def segment_whole(
     elif nibabel:
         conformed=np.ascontiguousarray(conformed.transpose([0,1,4,3,2])).copy()
 
-    # MONAI-style normalization
+    # intensity normalization
     if normalize:
         # Quantile-based normalization (0-1 range)
         conformed = conformed - conformed.min()
@@ -364,6 +365,46 @@ def segment_whole(
 
     return out
 
+def get_gaussian_weights(patch_size, sigma_scale=1.0/8):
+    """
+    Generate Gaussian weights for overlapping regions in sliding window inference.
+    Args:
+        patch_size: Size of the patch
+        sigma_scale: Scale factor for sigma
+    Returns:
+        Gaussian weights array (1, 1, *patch_size), maximum 1
+    """
+    if not isinstance(patch_size, (list, tuple)):
+        patch_size = [patch_size] * 3
+    
+    sigma = [patch_size[i] * sigma_scale for i in range(3)]
+    coords = [np.arange(patch_size[i]) for i in range(3)]
+    mesh = np.meshgrid(*coords, indexing='ij')
+    
+    # Calculate distances from center
+    center = [(patch_size[i] - 1) / 2 for i in range(3)]
+    dist =sum(((mesh[i] - center[i]) / sigma[i]) ** 2 for i in range(3))
+    
+    # Calculate Gaussian weights
+    weights = np.exp(-0.5 * dist)
+    weights = weights / np.max(weights)
+    # handle non-positive weights
+    min_non_zero = max(np.min(weights), 1e-3)
+    weights = np.clip(weights, min=min_non_zero)
+
+    # add batch and channel dimensions
+    weights = np.expand_dims(np.expand_dims(weights, 0), 0)
+
+    return weights.astype(np.float32)
+
+def legacy_window_starts(image_size, roi_size, interval):
+    """
+    Original window layout: ceil(image_size/interval) windows per axis, those that would run past the end
+    are clamped onto the last position, so that position can occur (and be counted) more than once.
+    """
+    return [[max(min(k * step, n - r), 0) for k in range(math.ceil(n / step))]
+            for n, r, step in zip(image_size, roi_size, interval)]
+
 def segment_with_patches_overlap(
         dataset, model, 
         crop=0,
@@ -383,7 +424,9 @@ def segment_with_patches_overlap(
         continuous=False,
         orig_aff=None,
         channel_last=False,
-        sw_batch_size=1):
+        sw_batch_size=1,
+        window_layout='dense',
+        gaussian_map='normalized'):
     """
     Apply model to dataset of arbitrary size using sliding window inference
     Args:
@@ -402,10 +445,15 @@ def segment_with_patches_overlap(
         normalize_mean_std: Whether to normalize using mean and std
         dist: Whether to use distance-based segmentation
         use_gaussian_weights: Whether to use Gaussian weights for overlapping regions
-        sigma_scale: Gaussian sigma as a fraction of the (cropped) patch size; MONAI/MindGlide use 0.125
+        sigma_scale: Gaussian sigma as a fraction of the (cropped) patch size
         sw_batch_size: number of windows per model call
-    Window layout, zero padding of short axes and gaussian map follow MONAI SlidingWindowInferer
-    (as used by MindGlide): with crop=0 and stride=patch_sz*(1-overlap) it reproduces MONAI exactly.
+        window_layout: 'dense' (default) - fewest windows spaced by `stride`, the last one clamped to the end,
+                           no duplicates (window_starts());
+                       'legacy' - original layout: ceil(size/stride) windows per axis, the ones past the end
+                           clamped onto the last position, which is then counted more than once
+        gaussian_map: 'normalized' (default) - original map, maximum 1 (get_gaussian_weights());
+                      'separable' - product of 1D float32 Gaussians, not normalised (separable_gaussian_weights())
+    Axes shorter than the patch are zero-padded and cropped back.
     """
     if continuous:
         out_name = "scan_out"
@@ -429,7 +477,7 @@ def segment_with_patches_overlap(
     elif nibabel:
         dataset=np.ascontiguousarray(dataset.transpose([0,1,4,3,2])).copy()
 
-    # MONAI-style normalization
+    # intensity normalization
     if normalize:
         dataset = dataset - dataset.min()
         dataset = np.clip(dataset / np.percentile(dataset,99), min=0.0, max=1.0)
@@ -440,7 +488,7 @@ def segment_with_patches_overlap(
         std = np.std(dataset[dataset>0])
         dataset = (dataset - mean) / std
 
-    # Axes shorter than the patch are zero-padded (MONAI: diff//2 before, rest after), cropped back at the end
+    # Axes shorter than the patch are zero-padded (diff//2 before, rest after), cropped back at the end
     dataset, pads = pad_to_size(dataset, patch_sz, axes=(2, 3, 4))
     dsize = dataset.shape
     output_size = list(dsize)
@@ -455,16 +503,24 @@ def segment_with_patches_overlap(
     patch_sz_ = [patch_sz[0] - crop*2, patch_sz[1] - crop*2, patch_sz[2] - crop*2]
     out_roi = [dsize[2]-crop*2, dsize[3]-crop*2, dsize[4]-crop*2]
 
-    # Gaussian importance map as in MONAI SlidingWindowInferer(mode='gaussian')
-    if use_gaussian_weights:
-        gaussian_weights = monai_gaussian_importance(patch_sz_, sigma_scale)[None, None]
-    else:
-        gaussian_weights = np.ones((1, 1, *patch_sz_), dtype=np.float32)
+    if window_layout not in ('legacy', 'dense'):
+        raise ValueError(f"window_layout: expected 'dense' or 'legacy', got {window_layout!r}")
+    if gaussian_map not in ('normalized', 'separable'):
+        raise ValueError(f"gaussian_map: expected 'normalized' or 'separable', got {gaussian_map!r}")
 
-    # Window layout as MONAI dense_patch_slices, applied to the used (cropped) part of the patches:
-    # fewest windows spaced by `stride`, the last one clamped to the end, no duplicates.
-    # With crop=0 and stride=patch_sz*(1-overlap) this is exactly MONAI's sliding window.
-    starts = window_starts(out_roi, patch_sz_, stride)
+    # Generate Gaussian weights if requested
+    if not use_gaussian_weights:
+        gaussian_weights = np.ones((1, 1, *patch_sz_), dtype=np.float32)
+    elif gaussian_map == 'separable':
+        gaussian_weights = separable_gaussian_weights(patch_sz_, sigma_scale)[None, None]
+    else:
+        gaussian_weights = get_gaussian_weights(patch_sz_, sigma_scale=sigma_scale)
+
+    # Window positions of the used (cropped) part of the patches
+    if window_layout == 'dense':
+        starts = window_starts(out_roi, patch_sz_, stride)
+    else:
+        starts = legacy_window_starts(out_roi, patch_sz_, stride)
     windows = np.array(np.meshgrid(*starts, indexing='ij')).reshape(3, -1).T + crop
 
     nb = dsize[0]
@@ -518,10 +574,24 @@ def segment_with_patches_overlap(
         output_fuzzy=output_fuzzy.transpose([0,1,4,3,2]).copy()
     return output_fuzzy 
 
-def mindglide_preprocess(data, aff, settings, ctx=None, minc=False):
+def resample_mode(settings):
     """
-    MindGlide-style preprocessing (mindglide/transforms.py), each step enabled by a config key:
-        reorient ("RAS"/None), crop_foreground, resample ("mindglide"/None) + spacing_float32,
+    Config `resample`:
+        "legacy" (default, also None) - original behaviour: the only resampling is `uniformize` / `reference`
+        "mindglide" - voxel-grid resampling to 1 mm before the model (cubic spline, truncated target shape),
+                      labels brought back per class (volume.grid_resample_* / grid_recover_*)
+    """
+    mode = settings.get('resample', None) or 'legacy'
+    if mode not in ('legacy', 'mindglide'):
+        raise ValueError(f"resample: expected 'legacy' or 'mindglide', got {mode!r}")
+    return mode
+
+
+def preprocess_volume(data, aff, settings, ctx=None, minc=False):
+    """
+    Optional geometry preprocessing, each step enabled by a config key:
+        reorient (axis codes, e.g. "RAS"/None), crop_foreground (bounding box of voxels > 0),
+        resample ("legacy": none here, see resample_mode() / voxel-grid resampling to 1 mm) + spacing_float32,
         normalize_mean_std_nonzero
     Args:
         data: volume as returned by load_volume_np (reversed voxel order, k,j,i)
@@ -529,12 +599,12 @@ def mindglide_preprocess(data, aff, settings, ctx=None, minc=False):
         ctx:  geometry from a previous call, to apply the same reorient/crop/resample to another channel
         minc: data comes from a MINC file (standard order, RAS): `reorient` needs no nibabel
     Returns:
-        (array to feed to the model, ctx for mindglide_postprocess*); with none of the keys set
+        (array to feed to the model, ctx for postprocess_labels / postprocess_fuzzy); with none of the keys set
         `data` is returned unchanged and ctx is None
     """
     reorient = settings.get('reorient', None)
     crop_fg = settings.get('crop_foreground', False)
-    resample = settings.get('resample', None) == 'mindglide'
+    resample = resample_mode(settings) != 'legacy'
     nz_norm = settings.get('normalize_mean_std_nonzero', False)
     if not (reorient or crop_fg or resample or nz_norm):
         return data, None
@@ -558,26 +628,26 @@ def mindglide_preprocess(data, aff, settings, ctx=None, minc=False):
         ctx['resample_flag'], ctx['new_shape'], ctx['anisotropy_flag'] = False, None, False
         if resample:
             # NIfTI stores the affine as float32; MINC gives float64 with different rounding noise,
-            # which flips MindGlide's exact spacing==1 test. Rounding to float32 makes MINC match NIfTI.
+            # which flips the exact spacing==1 test. Rounding to float32 makes MINC match NIfTI.
             sp_aff = aff_r.astype(np.float32) if settings.get('spacing_float32', False) else aff_r
             ctx['resample_flag'], ctx['new_shape'], ctx['anisotropy_flag'] = \
-                mindglide_resample_shape(affine_spacing(sp_aff), ctx['crop_shape'])
+                grid_resample_shape(affine_spacing(sp_aff), ctx['crop_shape'])
 
     bb_start, bb_end = ctx['bb_start'], ctx['bb_end']
     arr = arr[bb_start[0]:bb_end[0], bb_start[1]:bb_end[1], bb_start[2]:bb_end[2]]
     if ctx['resample_flag']:
-        arr = mindglide_resample_image(arr, ctx['new_shape'], ctx['anisotropy_flag'])
+        arr = grid_resample_image(arr, ctx['new_shape'], ctx['anisotropy_flag'])
     if nz_norm:
         arr = nonzero_mean_std_normalize(arr)
     return np.ascontiguousarray(arr, dtype=np.float32), ctx
 
 
-def mindglide_postprocess(labels, ctx, n_classes, bck=0):
-    """Undo mindglide_preprocess for a label map: recover resampling, un-crop, reorient back, (k,j,i) order."""
+def postprocess_labels(labels, ctx, n_classes, bck=0):
+    """Undo preprocess_volume for a label map: recover resampling, un-crop, reorient back, (k,j,i) order."""
     if ctx is None:
         return labels
     if ctx['resample_flag']:
-        labels = mindglide_recover_labels(labels, n_classes, ctx['crop_shape'], ctx['anisotropy_flag'])
+        labels = grid_recover_labels(labels, n_classes, ctx['crop_shape'], ctx['anisotropy_flag'])
     seg = np.full(ctx['full_shape'], bck, dtype=labels.dtype)
     bb_start, bb_end = ctx['bb_start'], ctx['bb_end']
     seg[bb_start[0]:bb_end[0], bb_start[1]:bb_end[1], bb_start[2]:bb_end[2]] = labels
@@ -586,8 +656,8 @@ def mindglide_postprocess(labels, ctx, n_classes, bck=0):
     return np.ascontiguousarray(seg.transpose([2, 1, 0]))
 
 
-def mindglide_postprocess_fuzzy(prob, ctx, bck=0):
-    """Undo mindglide_preprocess for per-class maps (C,...): linear resampling back, background
+def postprocess_fuzzy(prob, ctx, bck=0):
+    """Undo preprocess_volume for per-class maps (C,...): linear resampling back, background
     channel = 1 / others = 0 outside the crop, reorient back, (k,j,i) order."""
     if ctx is None:
         return prob
@@ -596,7 +666,7 @@ def mindglide_postprocess_fuzzy(prob, ctx, bck=0):
     for c in range(prob.shape[0]):
         p = prob[c]
         if ctx['resample_flag']:
-            p = mindglide_recover_prob(p, ctx['crop_shape'], ctx['anisotropy_flag'])
+            p = grid_recover_prob(p, ctx['crop_shape'], ctx['anisotropy_flag'])
         full = np.full(ctx['full_shape'], 1.0 if c == bck else 0.0, dtype=np.float32)
         full[bb_start[0]:bb_end[0], bb_start[1]:bb_end[1], bb_start[2]:bb_end[2]] = p
         if ctx['tr'] is not None:
@@ -607,10 +677,10 @@ def mindglide_postprocess_fuzzy(prob, ctx, bck=0):
 
 def keep_largest(seg, settings, bck=0):
     """Config `largest`: keep the largest connected component of the foreground (`largest_connectivity`,
-    1 = 6-neighbourhood as MindGlide, 3 = 26-neighbourhood)."""
+    3 = 26-neighbourhood, the default, 1 = 6-neighbourhood)."""
     if settings.get('largest', False):
         seg = seg.copy()
-        seg[~find_largest_component(seg != bck, connectivity=settings.get('largest_connectivity', 1))] = bck
+        seg[~find_largest_component(seg != bck, connectivity=settings.get('largest_connectivity', 3))] = bck
     return seg
 
 
@@ -657,8 +727,8 @@ def load_scan(channels, settings, ref_data=None, ref_aff=None):
             assert np.all(info['shape'] == np.array(data.shape)), f"{ch}: shape differs from {info['ref_file']}"
             assert np.all(np.abs(np.asarray(info['aff']) - np.asarray(aff)) < 1e-3), f"{ch}: affine differs from {info['ref_file']}"
 
-        # MindGlide-style reorient/crop/resample/normalize (config keys), same geometry for all channels
-        data, info['prep_ctx'] = mindglide_preprocess(data, aff, settings, info['prep_ctx'],
+        # optional reorient/crop/resample/normalize (config keys), same geometry for all channels
+        data, info['prep_ctx'] = preprocess_volume(data, aff, settings, info['prep_ctx'],
                                                       minc=ch.endswith('.mnc'))
 
         if ref_aff is not None:
@@ -679,6 +749,9 @@ def segment_with_onnx(in_scans, out_seg, settings,
     """
     Segment one scan: in_scans is the list of its input channels. Runs segment_with_onnx_batched with batch size 1.
     """
+    missing = [f for f in in_scans if isinstance(f, str) and not os.path.exists(f)]
+    if missing:
+        raise FileNotFoundError(f"Input file(s) do not exist: {missing}")
     segment_with_onnx_batched([in_scans], [out_seg], settings,
         cpu=cpu, threads=threads, history=history, device_id=device_id, use_tf32=use_tf32,
         minibatch_size=1, measure=measure, fuzzy=fuzzy, crash=True)
@@ -741,6 +814,9 @@ def segment_with_onnx_batched(in_scans, out_segs,
     use_gaussian_weights = settings.get('use_gaussian_weights', False)
     sigma_scale = settings.get('sigma_scale', 0.25)
     sw_batch_size = settings.get('sw_batch_size', 1)
+    window_layout = settings.get('window_layout', 'dense')
+    gaussian_map = settings.get('gaussian_map', 'normalized')
+    resample_mode(settings)  # validate
     continuous = settings.get('continuous', False)
     trim = settings.get('trim', False)
     channel_last = settings.get('channel_last', False)
@@ -818,7 +894,7 @@ def segment_with_onnx_batched(in_scans, out_segs,
                 continue
 
             loaded = [load_scan(scan, settings, ref_data, ref_aff) for scan in batch_scans]
-            # scans are stacked when their shapes agree (MindGlide-style cropping/resampling makes them differ)
+            # scans are stacked when their shapes agree (foreground cropping/resampling makes them differ)
             if len(set(d.shape for d, _ in loaded)) == 1:
                 groups = [list(range(len(loaded)))]
             else:
@@ -828,7 +904,7 @@ def segment_with_onnx_batched(in_scans, out_segs,
                 infos = [loaded[i][1] for i in grp]
                 batch_inputs = [loaded[i][0] for i in grp]
                 if augment_tta is not None:
-                    # flip along X: last array axis as loaded, first after MindGlide-style reorientation
+                    # flip along X: last array axis as loaded, first after the geometry preprocessing
                     flip_axis = 2 if infos[0]['prep_ctx'] is not None else 4
                     batch_inputs += [np.flip(i, axis=flip_axis) for i in batch_inputs]
                 dset = np.concatenate(batch_inputs, axis=0)
@@ -881,6 +957,8 @@ def segment_with_onnx_batched(in_scans, out_segs,
                             use_gaussian_weights=use_gaussian_weights,
                             sigma_scale=sigma_scale,
                             sw_batch_size=sw_batch_size,
+                            window_layout=window_layout,
+                            gaussian_map=gaussian_map,
                             continuous=continuous,
                             channel_last=channel_last)
                     all_fuzzy_outputs.append(dset_out_fuzzy)
@@ -943,8 +1021,8 @@ def segment_with_onnx_batched(in_scans, out_segs,
                     orig_aff, orig_shape, new_aff = info['aff'], info['shape'], info['new_aff']
 
                     dst_out_ = np.ascontiguousarray(dset_out[k].squeeze(), dtype=np.float32 if continuous else np.uint8)
-                    # undo MindGlide-style preprocessing
-                    dst_out_ = mindglide_postprocess(dst_out_, info['prep_ctx'], use_classes or n_classes, bck)
+                    # undo the geometry preprocessing
+                    dst_out_ = postprocess_labels(dst_out_, info['prep_ctx'], use_classes or n_classes, bck)
 
                     if not save_uniformized and (uniformize is not None or ref_aff is not None) and np.any(np.array(dst_out_.shape) != orig_shape):
                         dst_out_ = resample_volume(dst_out_, new_aff, orig_shape, orig_aff, order=0, fill=bck)[0]
@@ -960,7 +1038,7 @@ def segment_with_onnx_batched(in_scans, out_segs,
                     if fuzzy is not None:
                         fuzzy_prefix = fuzzy if len(in_scans) == 1 else f"{fuzzy}_{b + i}"
                         fuzzy_ext = '.nii.gz' if out_seg.endswith('.nii.gz') else '.mnc'  # same format as the segmentation
-                        prob = mindglide_postprocess_fuzzy(dset_out_fuzzy[k], info['prep_ctx'], bck)
+                        prob = postprocess_fuzzy(dset_out_fuzzy[k], info['prep_ctx'], bck)
                         for f in range(prob.shape[0]):
                             dset_out_f = prob[f]
                             if not save_uniformized and (uniformize is not None or ref_aff is not None) and np.any(np.array(dset_out_f.shape) != orig_shape):
